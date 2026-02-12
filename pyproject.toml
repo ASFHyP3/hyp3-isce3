@@ -23,7 +23,7 @@ classifiers=[
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "hyp3lib>=3,<4",
+    "hyp3lib>=3,<5",
     # TODO: insert Python dependencies as list here
 ]
 dynamic = ["version"]
