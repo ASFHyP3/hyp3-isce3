@@ -61,7 +61,7 @@ def download_rslc(granule_name: str) -> str:
 
     res.download(path='.')
 
-    for scene in Path().glob(f"{granule_name}*.h5"):
+    for scene in Path().glob(f'{granule_name}*.h5'):
         h5file_path = str(scene)
     return h5file_path
 
@@ -96,7 +96,7 @@ def get_scene_polygon(reference_path: str, epsg_code: int = 4326) -> ogr.Geometr
     Returns:
         geom: Polygon of the reference scene.
     """
-    poly, epsg = stage_dem.determine_polygon(reference_path, bbox = None, bbox_epsg = epsg_code)
+    poly, epsg = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=epsg_code)
     poly = stage_dem.apply_margin_to_geographic_box(poly)
     geom = ogr.CreateGeometryFromWkt(str(poly))
 
@@ -119,7 +119,7 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
     """
     reference_path = download_rslc(reference_scene)
     secondary_path = download_rslc(secondary_scene)
-    
+
     scene_polygon = get_scene_polygon(reference_path)
     get_dem(scene_polygon)
     yaml_path = get_config(reference_path, secondary_path)
@@ -149,7 +149,7 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
     _, out_paths = h5_prep.get_products_and_paths(insar_runcfg.cfg)
 
     insar.run(cfg=insar_runcfg.cfg, out_paths=out_paths, run_steps=run_steps)
-    
+
     if not Path('GUNW.h5').exists():
         raise RuntimeError('The GUNW file was not written!')
     return Path('GUNW.h5')
