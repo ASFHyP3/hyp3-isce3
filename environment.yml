@@ -11,7 +11,14 @@ dependencies:
   - pytest-console-scripts
   - pytest-cov
   # For running
+  - asf_search
+  - gdal
+  - isce3
   - hyp3lib>=3,<4
+  - libgdal-hdf5
+  - pyaps3
+  - pygrib
+  - snaphu
   # TODO: insert conda-forge dependencies as list here
   - pip:
       - -r requirements-static.txt
