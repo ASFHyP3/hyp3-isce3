@@ -15,7 +15,8 @@ def main() -> None:
     parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
 
     # TODO: Your arguments here
-    parser.add_argument('--greeting', default='Hello world!', help='Write this greeting to a product file')
+    parser.add_argument('--reference', help='Name of the reference scene')
+    parser.add_argument('--secondary', help='Name of the secondary scene')
 
     args = parser.parse_args()
 
@@ -24,7 +25,8 @@ def main() -> None:
     )
 
     product_file = process_isce3(
-        greeting=args.greeting,
+        reference_scene=args.reference,
+        secondary_scene=args.secondary,
     )
 
     if args.bucket:
