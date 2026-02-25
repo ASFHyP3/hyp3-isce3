@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     with:
-      python_version: '3.10'
+      python_version: '3.12'
 
   call-docker-ghcr-workflow:
     needs: call-version-info-workflow
