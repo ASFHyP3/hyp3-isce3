@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hyp3_isce3"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     {name="username_for_github_actions", email="email_for@github_actions.com"},
 ]
@@ -17,13 +17,11 @@ classifiers=[
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "hyp3lib>=3,<4",
+    "hyp3lib>=3,<5",
     # TODO: insert Python dependencies as list here
 ]
 dynamic = ["version"]
@@ -89,7 +87,7 @@ suppress-dummy-args = true
 
 # Please keep the following mypy options up-to-date with https://github.com/ASFHyP3/actions/#reusable-mypyyml
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_redundant_casts = true
 warn_unused_ignores = true
 warn_unreachable = true

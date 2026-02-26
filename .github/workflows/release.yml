@@ -12,7 +12,5 @@ jobs:
     permissions: {}
     with:
       release_prefix: HyP3 isce3
-      release_branch: main
-      develop_branch: develop
     secrets:
-      USER_TOKEN: ${{ secrets.USERNAME_FOR_GITHUB_ACTIONS_PAK }}
+      USER_TOKEN: ${{ secrets.TOOLS_BOT_PAK }}

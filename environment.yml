@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python>=3.10
+  - python>=3.12
   - pip
   # For packaging, and testing
   - setuptools_scm
@@ -11,7 +11,14 @@ dependencies:
   - pytest-console-scripts
   - pytest-cov
   # For running
+  - asf_search
+  - gdal
+  - isce3
   - hyp3lib>=3,<4
+  - libgdal-hdf5
+  - pyaps3
+  - pygrib
+  - snaphu
   # TODO: insert conda-forge dependencies as list here
   - pip:
       - -r requirements-static.txt
