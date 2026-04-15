@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import asf_search as asf
+from datetime import datetime, timedelta
 from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
@@ -66,6 +67,76 @@ def download_rslc(granule_name: str) -> str:
     return h5file_path
 
 
+def get_orbit(scene_name: str) -> Path:
+    """Download orbit files.
+
+    Args:
+        scene_name: Scene name.
+
+    Returns:
+        orbit_path: Path of the orbit file.
+    """
+    short_name = 'NISAR_OE'
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
+    results = earthaccess.search_data(short_name=short_name, granule_name='*POE*', temporal=temporal)
+    if len(results) == 0:
+        results = earthaccess.search_data(short_name=short_name, granule_name='*MOE*', temporal=temporal)
+    if len(results) == 0:
+        results = earthaccess.search_data(short_name=short_name, granule_name='*NOE*', temporal=temporal)
+    if len(results) == 0:
+        results = earthaccess.search_data(short_name=short_name, granule_name='*FOE*', temporal=temporal)
+    if len(results) == 0:
+        raise RuntimeError(f'Orbit for scene {scene_name} not found')
+
+    files = sorted(earthaccess.download(results))
+    return files[-1]
+
+
+def get_tropo(scene_name: str) -> Path:
+    """Download files to apply tropospheric corrections.
+
+    Args:
+        scene_name: Scene name.
+
+    Returns:
+        tropo_path: Path of the file.
+    """
+    short_name = 'ASF_ECMWF_TROP'
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    day = start_time
+    if day.hour%6 > 3:
+        tropo_date = day + timedelta(hours = int(day.hour/6)*6)
+    else:
+        tropo_date = day + timedelta(hours = int(day.hour/6 + 1)*6)
+    temporal = (tropo_date.strftime('%Y-%m-%d %H'), tropo_date.strftime('%Y-%m-%d %H'))
+    results = earthaccess.search_data(short_name = short_name, temporal = temporal)
+    files = sorted(earthaccess.download(results))
+
+    return files[-1]
+
+
+def get_tec(scene_name: str) -> Path:
+    """Download files to apply ionospheric corrections.
+
+    Args:
+        scene_name: Scene name.
+
+    Returns:
+        tropo_path: Path of the file.
+    """
+    short_name = 'NISAR_TEC'
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
+    results = earthaccess.search_data(short_name = short_name, temporal = temporal)
+    files = sorted(earthaccess.download(results))
+
+    return files[-1]
+
+
 def get_dem(scene_poly: ogr.Geometry, dem_path: str = 'dem.tif') -> str:
     """Download DEM for a given polygon.
 
@@ -117,8 +188,15 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
     Returns:
         h5file: Path of the GUNW h5file.
     """
+    earthacces.login()
     reference_path = download_rslc(reference_scene)
     secondary_path = download_rslc(secondary_scene)
+
+    reference_orbit = get_orbit(reference_scene)
+    secondary_orbit = get_orbit(secondary_scene)
+
+    reference_tropo = get_tropo(reference_scene)
+    secondary_tropo = get_tropo(secondary_scene)
 
     scene_polygon = get_scene_polygon(reference_path)
     get_dem(scene_polygon)

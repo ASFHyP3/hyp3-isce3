@@ -12,6 +12,7 @@ dependencies:
   - pytest-cov
   # For running
   - asf_search
+  - earthaccess
   - gdal
   - isce3
   - hyp3lib>=3,<4
