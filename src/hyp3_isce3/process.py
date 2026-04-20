@@ -169,7 +169,7 @@ def get_tropo(scene_name: str) -> str:
     short_name = 'ASF_ECMWF_TROP'
     start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
     day = datetime(start_date.year, start_date.month, start_date.day)
-    if start_date.hour % 6 > 3:
+    if start_date.hour % 6 < 3:
         tropo_date = day + timedelta(hours=int(start_date.hour / 6) * 6)
     else:
         tropo_date = day + timedelta(hours=int(start_date.hour / 6 + 1) * 6)
