@@ -9,6 +9,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.2.0]
 
 ### Added
+- Added ionospheric and tropospheric corrections.
 - Added initial workflow to get a GUNW from a pair of NISAR images. The parameters `--reference` and `secondary` refer to the scene names of the RSLCs.
 
 ## [0.1.0]
