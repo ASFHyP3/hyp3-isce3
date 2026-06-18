@@ -19,6 +19,9 @@ import hyp3_isce3
 from hyp3_isce3.crop_rslc import crop_rslc_pair
 
 
+asf.constants.INTERNAL.CMR_TIMEOUT = 90
+
+
 log = logging.getLogger(__name__)
 
 

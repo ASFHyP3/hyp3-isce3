@@ -34,18 +34,19 @@ def main() -> None:
     parser.add_argument(
         '--subset',
         type=nullable_subset_list,
-        nargs='+',
+        nargs='*',
         help='Optional WGS84 bounding box to subset the output GUNW (LON_MIN, LAT_MIN, LON_MAX, LAT_MAX)',
     )
 
     args = parser.parse_args()
 
-    args.subset = [float(item) for sublist in args.subset for item in sublist]
+    if args.subset is not None:
+        args.subset = [float(item) for sublist in args.subset for item in sublist]
 
-    if len(args.subset) == 0:
-        args.subset = None
-    elif not len(args.subset) == 4:
-        raise ValueError('The number of coordinates is not four')
+        if len(args.subset) == 0:
+            args.subset = None
+        elif not len(args.subset) == 4:
+            raise ValueError('The number of coordinates is not four')
 
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO
