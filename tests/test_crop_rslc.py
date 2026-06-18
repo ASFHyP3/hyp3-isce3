@@ -269,8 +269,10 @@ class TestCropPair:
         # mimic that so the per-file output names don't collide.
         sec = tmp_path / 'synthetic_rslc_sec.h5'
         _make_rslc(sec)
+        # bbox_wgs84/dem_file are unused here (the window solve is stubbed above),
+        # but pass type-valid values so static analysis is happy.
         ref_sub, sec_sub = crop_rslc_pair(
-            rslc_h5, sec, bbox_wgs84=None, dem_file=None, out_dir=tmp_path / 'subs', margin=MARGIN
+            rslc_h5, sec, bbox_wgs84=[0.0, 0.0, 0.0, 0.0], dem_file='', out_dir=tmp_path / 'subs', margin=MARGIN
         )
         for p in (ref_sub, sec_sub):
             assert Path(p).exists()
