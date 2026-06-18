@@ -17,6 +17,13 @@ def main() -> None:
     # TODO: Your arguments here
     parser.add_argument('--reference', help='Name of the reference scene')
     parser.add_argument('--secondary', help='Name of the secondary scene')
+    parser.add_argument(
+        '--subset',
+        type=float,
+        nargs=4,
+        metavar=('LON_MIN', 'LAT_MIN', 'LON_MAX', 'LAT_MAX'),
+        help='Optional WGS84 bounding box to subset the output GUNW',
+    )
 
     args = parser.parse_args()
 
@@ -27,6 +34,7 @@ def main() -> None:
     product_file = process_isce3(
         reference_scene=args.reference,
         secondary_scene=args.secondary,
+        subset=args.subset,
     )
 
     if args.bucket:

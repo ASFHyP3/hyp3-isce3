@@ -13,8 +13,10 @@ from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import ogr, osr
+from pyproj import Transformer
 
 import hyp3_isce3
+from hyp3_isce3.crop_rslc import crop_rslc_pair
 
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,8 @@ def get_config(
     secondary_tropo: str,
     tec_path: str,
     watermask: str,
+    subset_utm: tuple[float, float, float, float] | None = None,
+    output_epsg: int | None = None,
 ) -> Path:
     """Create a configuration file for isce3.
 
@@ -41,6 +45,8 @@ def get_config(
         secondary_tropo: Path of the ECMWF file for the secondary scene.
         tec_path: Path of the TEC file for the reference scene.
         watermask: Path of the water mask file.
+        subset_utm: Optional (xmin, ymin, xmax, ymax) output box in UTM meters.
+        output_epsg: EPSG code of ``subset_utm``; written into the geocode blocks so the corners and projection stay consistent.
 
     Returns:
         yaml_file: Path of the configuration file.
@@ -81,7 +87,29 @@ def get_config(
                 newstring = line
             yaml.write(newstring)
 
+        # When subsetting, pin the geocode and radar_grid_cubes output grids to
+        # the AOI: set each block's output_epsg to the same zone we used for the
+        # corners (so corners and projection are consistent rather than trusting
+        # the downloaded config's epsg), then overwrite top_left / bottom_right.
+        # Both blocks list top_left then bottom_right (each with y_abs then
+        # x_abs); the dem_download block uses x/y, not x_abs/y_abs, so it is
+        # untouched. (The radar-domain steps are shrunk by the RSLC crop, not by
+        # these output grids.)
+        xmin, ymin, xmax, ymax = subset_utm if subset_utm else (None, None, None, None)
+        corner = 0
         for line in lines_tmp[first::]:
+            if subset_utm is None:
+                pass
+            elif 'output_epsg' in line:
+                line = f'{line.partition(":")[0]}: {output_epsg}\n'
+            elif 'top_left' in line:
+                corner = 1
+            elif 'bottom_right' in line:
+                corner = 2
+            elif corner and 'x_abs' in line:
+                line = f'{line.partition(":")[0]}: {xmin if corner == 1 else xmax}\n'
+            elif corner and 'y_abs' in line:
+                line = f'{line.partition(":")[0]}: {ymax if corner == 1 else ymin}\n'
             yaml.write(line)
 
     return Path('insar.yaml')
@@ -259,6 +287,23 @@ def get_epsg(lat: float, lon: float) -> int:
     return epsg_base + zone_number
 
 
+def reproject_subset(subset: list[float], epsg_code: int) -> tuple[float, float, float, float]:
+    """Reproject a WGS84 lon/lat subset box to the output UTM projection.
+
+    Args:
+        subset: WGS84 bounding box as [lon_min, lat_min, lon_max, lat_max].
+        epsg_code: Output UTM EPSG code.
+
+    Returns:
+        bbox: Enclosing (xmin, ymin, xmax, ymax) box in UTM meters.
+    """
+    lon_min, lat_min, lon_max, lat_max = subset
+    # transform_bounds densifies the edges, so the returned box encloses the
+    # reprojected lon/lat rectangle even where its boundary bulges between corners.
+    transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_code}', always_xy=True)
+    return transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
+
+
 def get_scene_polygon(reference_path: str) -> ogr.Geometry:
     """Get Polygon for reference scene.
 
@@ -307,12 +352,13 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     return product_id
 
 
-def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
+def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float] | None = None) -> Path:
     """Get Polygon for reference scene.
 
     Args:
         reference_scene: Name of the reference scene.
         secondary_scene: Name of the secondary scene.
+        subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
 
     Returns:
         h5file: Path of the GUNW h5file.
@@ -334,7 +380,19 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
     tec_path = get_tec(reference_scene)
 
     scene_polygon, epsg_code = get_scene_polygon(reference_path)
-    _ = get_dem(scene_polygon, epsg_code)
+    dem_path = get_dem(scene_polygon, epsg_code)
+
+    # Subset the RSLCs to the area of interest before processing so every
+    # radar-domain step runs on a small patch instead of the full frame. The
+    # crop uses the raw lon/lat AOI (geo2rdr is geodetic); the runconfig geocode
+    # grids need the same AOI in UTM meters.
+    subset_utm = None
+    if subset:
+        subset_utm = reproject_subset(subset, epsg_code)
+        reference_path, secondary_path = crop_rslc_pair(
+            reference_path, secondary_path, subset, dem_path, out_dir='.', margin=512
+        )
+
     yaml_path = get_config(
         reference_path,
         secondary_path,
@@ -344,6 +402,8 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
         secondary_tropo,
         tec_path,
         watermask,
+        subset_utm,
+        epsg_code,
     )
     args = argparse.Namespace(run_config_path=str(yaml_path), log_file=False)
     insar_runcfg = InsarRunConfig(args)

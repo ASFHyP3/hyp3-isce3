@@ -21,6 +21,7 @@ dependencies:
   - pandas<3
   - pyaps3
   - pygrib
+  - pyproj
   - raider>=0.4.5,<0.5.4
   - snaphu
   - utm
