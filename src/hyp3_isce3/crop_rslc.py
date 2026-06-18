@@ -15,10 +15,13 @@ each acquisition's window comes from its own orbit. The crop is a plain integer
 slice -- no resampling.
 
 Cropped: ``swaths/zeroDopplerTime``, the ``frequency{A,B}`` images, their
-``slantRange`` and ``validSamples``, and ``metadata/geolocationGrid`` (bracketed
-to span the cropped swath). Restamped: ``identification/zeroDoppler{Start,End}Time``
-and ``identification/boundingPolygon`` (the GUNW writer copies both from the RSLC).
-Everything else (orbit, attitude, doppler, calibration, ...) is copied verbatim:
+``slantRange`` and ``validSamples``, and the radar-coordinate metadata grids
+``metadata/geolocationGrid`` and ``metadata/processingInformation/parameters``
+(``dopplerCentroid``, ``referenceTerrainHeight``), bracketed to span the cropped
+swath. Restamped: ``identification/zeroDoppler{Start,End}Time`` and
+``identification/boundingPolygon``. The GUNW writer copies these grids and
+identification fields from the RSLC, so cropping them keeps the GUNW consistent.
+Everything else (orbit, attitude, calibration, ...) is copied verbatim:
 the workflow interpolates these coordinate-indexed tables, and the cropped grid
 is a subset of their domain.
 """
@@ -205,11 +208,13 @@ def _copy_cropped(src_ds: h5py.Dataset, dst_grp: h5py.Group, name: str, slices: 
 def _crop_grid_group(
     src_grp: h5py.Group, dst_grp: h5py.Group, az_lo: float, az_hi: float, rg_lo: float, rg_hi: float
 ) -> None:
-    """Crop a radar-coordinate metadata grid group (e.g. geolocationGrid) into ``dst_grp``.
+    """Crop a radar-coordinate metadata grid group (geolocationGrid, processingInformation/parameters).
 
     The group has its own 1-D ``zeroDopplerTime``/``slantRange`` axes; data layers
-    are indexed by them on their trailing two dims. Axes are *bracketed* (one node
-    outside the swath extent each side) so the cropped grid still spans the swath.
+    are indexed by them (1-D on whichever axis matches, or on their trailing two
+    dims). Nested grid subgroups (e.g. ``frequency{A,B}``) are cropped recursively.
+    Axes are *bracketed* (one node outside the swath extent each side) so the
+    cropped grid still spans the swath.
     """
     grid_az = src_grp['zeroDopplerTime'][()]
     grid_rg = src_grp['slantRange'][()]
@@ -220,16 +225,27 @@ def _crop_grid_group(
     _copy_attrs(src_grp, dst_grp)
     for key, item in src_grp.items():
         if isinstance(item, h5py.Group):
-            src_grp.copy(key, dst_grp, name=key)
+            # A nested grid group (its own axes) is cropped recursively; anything
+            # else (no axes) is copied verbatim.
+            if 'zeroDopplerTime' in item and 'slantRange' in item:
+                _crop_grid_group(item, dst_grp.create_group(key), az_lo, az_hi, rg_lo, rg_hi)
+            else:
+                src_grp.copy(key, dst_grp, name=key)
         elif key == 'zeroDopplerTime':
             _copy_cropped(item, dst_grp, key, (slice(gz0, gz1),))
         elif key == 'slantRange':
             _copy_cropped(item, dst_grp, key, (slice(gs0, gs1),))
+        elif key == 'heightAboveEllipsoid':
+            src_grp.copy(key, dst_grp, name=key)  # height axis -> not az/range indexed
         elif item.ndim >= 2 and item.shape[-2] == n_az and item.shape[-1] == n_rg:
             sl = (slice(None),) * (item.ndim - 2) + (slice(gz0, gz1), slice(gs0, gs1))
             _copy_cropped(item, dst_grp, key, sl)
+        elif item.ndim == 1 and item.shape[0] == n_az:
+            _copy_cropped(item, dst_grp, key, (slice(gz0, gz1),))  # az-indexed 1-D, e.g. referenceTerrainHeight
+        elif item.ndim == 1 and item.shape[0] == n_rg:
+            _copy_cropped(item, dst_grp, key, (slice(gs0, gs1),))
         else:
-            # Height axis (heightAboveEllipsoid), epsg, etc. -> not on the radar grid.
+            # epsg, chirp weightings, run-config string, etc. -> not on the radar grid.
             src_grp.copy(key, dst_grp, name=key)
 
 
@@ -366,11 +382,12 @@ def crop_rslc(
         root = f'science/{_band(src)}'
         swaths = f'{root}/RSLC/swaths'
         geoloc = f'{root}/RSLC/metadata/geolocationGrid'
+        params = f'{root}/RSLC/metadata/processingInformation/parameters'
         identification = f'{root}/identification'
 
-        # Copy everything verbatim except the two cropped subtrees, creating their
-        # parent groups so the cropped versions can attach.
-        _mirror_except(src, dst, {swaths, geoloc})
+        # Copy everything verbatim except the radar-coordinate subtrees, creating
+        # their parent groups so the cropped versions can attach.
+        _mirror_except(src, dst, {swaths, geoloc, params})
 
         # Cropped-swath extent, used to bracket the geolocation grid and restamp
         # the identification times.
@@ -382,6 +399,7 @@ def crop_rslc(
         # Fill the pruned subtrees with their cropped contents.
         _crop_swaths_group(src[swaths], dst.create_group(swaths), window, polarizations)
         _crop_grid_group(src[geoloc], dst.create_group(geoloc), az_lo, az_hi, rg_lo, rg_hi)
+        _crop_grid_group(src[params], dst.create_group(params), az_lo, az_hi, rg_lo, rg_hi)
 
         # Restamp identification times and footprint to the cropped extent (the
         # GUNW writer copies both straight from the reference RSLC).

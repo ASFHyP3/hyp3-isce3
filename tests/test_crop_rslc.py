@@ -103,7 +103,21 @@ def _make_rslc(path):
         ident = f.create_group('science/LSAR/identification')
         ident.create_dataset('zeroDopplerStartTime', data=np.bytes_('2025-01-01T00:00:00'))
         ident.create_dataset('zeroDopplerEndTime', data=np.bytes_('2025-01-01T00:01:39'))
-        ident.create_dataset('boundingPolygon', data=np.bytes_('POLYGON ((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'))
+        ident.create_dataset(
+            'boundingPolygon', data=np.bytes_('POLYGON ((-180 -90, 180 -90, 180 90, -180 90, -180 -90))')
+        )
+
+        # processingInformation/parameters: own grid axes, a 1-D az layer, a non-grid
+        # 1-D array, and a nested per-frequency cube -> grid pieces cropped, rest kept.
+        pp = f.create_group('science/LSAR/RSLC/metadata/processingInformation/parameters')
+        pp.create_dataset('zeroDopplerTime', data=GRID_AZ)
+        pp.create_dataset('slantRange', data=GRID_RG)
+        pp.create_dataset('referenceTerrainHeight', data=np.arange(N_AZG, dtype='f4'))  # az-indexed
+        pp.create_dataset('rangeChirpWeighting', data=np.ones(8, dtype='f4'))  # not az/range -> verbatim
+        fa = pp.create_group('frequencyA')
+        fa.create_dataset('zeroDopplerTime', data=GRID_AZ)
+        fa.create_dataset('slantRange', data=GRID_RG)
+        fa.create_dataset('dopplerCentroid', data=np.outer(GRID_AZ, GRID_RG))  # (az, range)
 
         # A metadata dataset on no cropped axis -> must be copied byte-for-byte.
         orb = f.create_dataset(
@@ -218,6 +232,20 @@ class TestCropRslc:
         with h5py.File(dst, 'r') as f:
             assert f['science/LSAR/identification/zeroDopplerStartTime'][()].decode() == EXPECTED_START
             assert f['science/LSAR/identification/zeroDopplerEndTime'][()].decode() == EXPECTED_END
+
+    def test_processing_parameters_cubes_cropped(self, rslc_h5, tmp_path):
+        dst = tmp_path / 'out.h5'
+        crop_rslc(rslc_h5, dst, EXPECTED_WINDOW, POLARIZATIONS)
+        pp = 'science/LSAR/RSLC/metadata/processingInformation/parameters'
+        with h5py.File(dst, 'r') as f:
+            # Own grid axes + the 1-D az layer bracketed to [2:7].
+            np.testing.assert_array_equal(f[f'{pp}/zeroDopplerTime'][()], GRID_AZ[EXPECTED_GRID_SLICE])
+            np.testing.assert_array_equal(f[f'{pp}/slantRange'][()], GRID_RG[EXPECTED_GRID_SLICE])
+            assert f[f'{pp}/referenceTerrainHeight'].shape == (5,)
+            # Nested per-frequency dopplerCentroid cropped on both az and range.
+            assert f[f'{pp}/frequencyA/dopplerCentroid'].shape == (5, 5)
+            # A non-grid 1-D array (chirp weighting) is left untouched.
+            assert f[f'{pp}/rangeChirpWeighting'].shape == (8,)
 
     def test_bounding_polygon_recomputed(self, rslc_h5, tmp_path):
         dst = tmp_path / 'out.h5'
