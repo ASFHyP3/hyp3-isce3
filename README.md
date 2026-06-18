@@ -4,7 +4,7 @@ The HyP3-ISCE3 plugin provides a workflow to process SAR satellite data using th
 
 ## Usage
 
-The HyP3-ISCE3 plugin provides a workflow (accessible directly in Python or via a CLI) for creating burst-based NISAR geocoded unwrapped interferogram using ISCE3 workflow.
+The HyP3-ISCE3 plugin provides a workflow (accessible directly in Python or via a CLI) for creating NISAR geocoded unwrapped interferogram using ISCE3 workflow.
 
 To run the workflow:
 
@@ -12,6 +12,15 @@ To run the workflow:
 python -m hyp3_isce3 \
   --reference NISAR_L1_PR_RSLC_005_172_A_008_2005_DHDH_A_20251122T024618_20251122T024652_X05007_N_F_J_001 \
   --secondary NISAR_L1_PR_RSLC_006_172_A_008_2005_DHDH_A_20251204T024618_20251204T024653_X05007_N_F_J_001 
+```
+
+The processing time can be reduced by using the `subset` parameter and a bounding box in the format `LON_MIN LAT_MIN LON_MAX LAT_MAX`:
+
+```
+python -m hyp3_isce3 \
+  --reference NISAR_L1_PR_RSLC_005_172_A_008_2005_DHDH_A_20251122T024618_20251122T024652_X05007_N_F_J_001 \
+  --secondary NISAR_L1_PR_RSLC_006_172_A_008_2005_DHDH_A_20251204T024618_20251204T024653_X05007_N_F_J_001 \
+  --subset 40.55 13.46 40.78 13.65
 ```
 
 ### Earthdata Login Credentials
