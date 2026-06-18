@@ -8,6 +8,20 @@ from hyp3lib.aws import upload_file_to_s3
 from hyp3_isce3.process import process_isce3
 
 
+def nullable_subset_list(subset_string: str) -> list[str]:
+    """Returns a list of the subset.
+
+    Args:
+        subset_string: input string with the subset coordinates.
+
+    Returns:
+        subset_list: List of coordinates.
+    """
+    subset_string = subset_string.replace('None', '').strip()
+    subset_list = [coord for coord in subset_string.split(' ') if coord]
+    return subset_list
+
+
 def main() -> None:
     """HyP3 entrypoint for hyp3_isce3."""
     parser = ArgumentParser()
@@ -19,13 +33,19 @@ def main() -> None:
     parser.add_argument('--secondary', help='Name of the secondary scene')
     parser.add_argument(
         '--subset',
-        type=float,
-        nargs=4,
-        metavar=('LON_MIN', 'LAT_MIN', 'LON_MAX', 'LAT_MAX'),
-        help='Optional WGS84 bounding box to subset the output GUNW',
+        type=nullable_subset_list,
+        nargs='+',
+        help='Optional WGS84 bounding box to subset the output GUNW (LON_MIN, LAT_MIN, LON_MAX, LAT_MAX)',
     )
 
     args = parser.parse_args()
+
+    args.subset = [float(item) for sublist in args.subset for item in sublist]
+
+    if len(args.subset) == 0:
+        args.subset = None
+    elif not len(args.subset) == 4:
+        raise ValueError('The number of coordinates is not four')
 
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO
