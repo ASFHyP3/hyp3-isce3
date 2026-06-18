@@ -35,7 +35,7 @@ def main() -> None:
         '--subset',
         type=nullable_subset_list,
         nargs='*',
-        help='Optional WGS84 bounding box to subset the output GUNW (LON_MIN, LAT_MIN, LON_MAX, LAT_MAX)',
+        help='Optional WGS84 bounding box to subset the output GUNW (LON_MIN LAT_MIN LON_MAX LAT_MAX)',
     )
 
     args = parser.parse_args()
