@@ -9,6 +9,7 @@ from pathlib import Path
 import asf_search as asf
 import earthaccess
 import utm
+import yaml
 from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
@@ -34,6 +35,7 @@ def get_config(
     secondary_tropo: str,
     tec_path: str,
     watermask: str,
+    template_yaml: Path,
     subset_utm: tuple[float, float, float, float] | None = None,
     output_epsg: int | None = None,
 ) -> Path:
@@ -48,26 +50,29 @@ def get_config(
         secondary_tropo: Path of the ECMWF file for the secondary scene.
         tec_path: Path of the TEC file for the reference scene.
         watermask: Path of the water mask file.
+        template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`) used as the tail/template.
         subset_utm: Optional (xmin, ymin, xmax, ymax) output box in UTM meters.
         output_epsg: EPSG code of ``subset_utm``; written into the geocode blocks so the corners and projection stay consistent.
 
     Returns:
         yaml_file: Path of the configuration file.
     """
-    tmp_yaml = download_yaml(reference_path)
-    with tmp_yaml.open('r') as yaml:
-        lines_tmp = yaml.readlines()
+    # Keep the downloaded runconfig's tail (product_path_group on) and splice our
+    # schema header in front. The caller owns template_yaml, so we don't delete it.
+    with Path(template_yaml).open('r') as f:
+        lines_tmp = f.readlines()
         for first, line in enumerate(lines_tmp):
             if 'product_path_group:' in line:
                 break
-    tmp_yaml.unlink()
 
+    # Our shipped schema is the header (input/ancillary file groups) with
+    # placeholder tokens standing in for the real scene/orbit/ancillary paths.
     yaml_schema = Path(hyp3_isce3.__file__).parent / 'schemas' / 'insar.yaml'
-    with yaml_schema.open('r') as yaml:
-        lines = yaml.readlines()
+    with yaml_schema.open('r') as f:
+        lines = f.readlines()
 
     yaml_file = Path('insar.yaml')
-    with yaml_file.open('w') as yaml:
+    with yaml_file.open('w') as out:
         for line in lines:
             newstring = ''
             if 'reference_scene' in line:
@@ -88,16 +93,10 @@ def get_config(
                 newstring += line.replace('watermask', watermask)
             else:
                 newstring = line
-            yaml.write(newstring)
+            out.write(newstring)
 
-        # When subsetting, pin the geocode and radar_grid_cubes output grids to
-        # the AOI: set each block's output_epsg to the same zone we used for the
-        # corners (so corners and projection are consistent rather than trusting
-        # the downloaded config's epsg), then overwrite top_left / bottom_right.
-        # Both blocks list top_left then bottom_right (each with y_abs then
-        # x_abs); the dem_download block uses x/y, not x_abs/y_abs, so it is
-        # untouched. (The radar-domain steps are shrunk by the RSLC crop, not by
-        # these output grids.)
+        # Pin the geocode and radar_grid_cubes output grids to the AOI and projection.
+        # The RSLC crop carries a margin, so this geocode box is the final crop.
         xmin, ymin, xmax, ymax = subset_utm if subset_utm else (None, None, None, None)
         corner = 0
         for line in lines_tmp[first::]:
@@ -113,9 +112,27 @@ def get_config(
                 line = f'{line.partition(":")[0]}: {xmin if corner == 1 else xmax}\n'
             elif corner and 'y_abs' in line:
                 line = f'{line.partition(":")[0]}: {ymax if corner == 1 else ymin}\n'
-            yaml.write(line)
+            out.write(line)
 
     return Path('insar.yaml')
+
+
+def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
+    """Read the InSAR crossmul (azimuth, range) multilook looks from the runconfig template.
+
+    The RSLC crop floors its window origin to these so the crop's multilook cells
+    coincide with a full-frame run. Sourcing them from the same runconfig the
+    workflow runs guarantees the two never drift. If looks are ever exposed as a
+    user/processing parameter, read that parameter here instead so the crop tracks it.
+
+    Args:
+        template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`).
+
+    Returns:
+        looks: (azimuth_looks, range_looks) from the runconfig ``crossmul`` block.
+    """
+    crossmul = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['crossmul']
+    return int(crossmul['azimuth_looks']), int(crossmul['range_looks'])
 
 
 def download_yaml(reference_path: str) -> Path:
@@ -385,15 +402,25 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     scene_polygon, epsg_code = get_scene_polygon(reference_path)
     dem_path = get_dem(scene_polygon, epsg_code)
 
-    # Subset the RSLCs to the area of interest before processing so every
-    # radar-domain step runs on a small patch instead of the full frame. The
-    # crop uses the raw lon/lat AOI (geo2rdr is geodetic); the runconfig geocode
-    # grids need the same AOI in UTM meters.
+    # The JPL runconfig is both our config template (its tail) and the source of the
+    # crossmul looks the crop aligns to; download once and reuse for both.
+    template_yaml = download_yaml(reference_path)
+
+    # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
+    # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
     subset_utm = None
     if subset:
         subset_utm = reproject_subset(subset, epsg_code)
+        az_looks, rg_looks = get_crossmul_looks(template_yaml)
         reference_path, secondary_path = crop_rslc_pair(
-            reference_path, secondary_path, subset, dem_path, out_dir='.', margin=512
+            reference_path,
+            secondary_path,
+            subset,
+            dem_path,
+            out_dir='.',
+            margin=512,
+            az_looks=az_looks,
+            rg_looks=rg_looks,
         )
 
     yaml_path = get_config(
@@ -405,9 +432,12 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
         secondary_tropo,
         tec_path,
         watermask,
+        template_yaml,
         subset_utm,
         epsg_code,
     )
+    template_yaml.unlink()  # consumed by the looks read and the config build
+
     args = argparse.Namespace(run_config_path=str(yaml_path), log_file=False)
     insar_runcfg = InsarRunConfig(args)
 

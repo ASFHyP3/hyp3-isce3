@@ -10,20 +10,37 @@ The window is found by solving the four AOI corners into the radar grid with
 isce3 ``geo2rdr`` (zero-Doppler, at each corner's DEM height), taking the
 bounding (azimuth time, slant range) box, mapping it onto the swath axes, and
 padding by a margin to guard processing edge effects (filter kernels,
-coregistration search). A reference/secondary pair is cropped independently --
+coregistration search). The reference/secondary pair is cropped independently --
 each acquisition's window comes from its own orbit. The crop is a plain integer
-slice -- no resampling.
+padded slice -- no resampling.
 
-Cropped: ``swaths/zeroDopplerTime``, the ``frequency{A,B}`` images, their
-``slantRange`` and ``validSamples``, and the radar-coordinate metadata grids
+Cropped: only ``swaths`` -- ``zeroDopplerTime``, the ``frequency{A,B}`` images,
+their ``slantRange`` and ``validSamples``. These image axes are what isce3 reads
+to build the radar grid, so cropping them is what shrinks every radar-domain
+step. Restamped: ``identification/zeroDoppler{Start,End}Time`` and
+``identification/boundingPolygon`` (metadata the GUNW writer copies verbatim).
+
+The window start is snapped down to a multiple of the InSAR multilook looks
+(azimuth lines, range samples). The interferogram is multilooked from the
+reference grid's first line/sample, so a crop whose origin is not on the look
+grid averages a shifted set of pixels versus a full-frame run. That is invisible
+in coherent ground (the look-cell average is smooth) but re-rolls the speckle
+realization in decorrelated areas; snapping the origin makes the cropped product
+match a full-frame run there too.
+
+Everything else is copied verbatim: we crop only what the InSAR workflow consumes
+from the swath images. The radar-coordinate metadata grids
 ``metadata/geolocationGrid`` and ``metadata/processingInformation/parameters``
-(``dopplerCentroid``, ``referenceTerrainHeight``), bracketed to span the cropped
-swath. Restamped: ``identification/zeroDoppler{Start,End}Time`` and
-``identification/boundingPolygon``. The GUNW writer copies these grids and
-identification fields from the RSLC, so cropping them keeps the GUNW consistent.
-Everything else (orbit, attitude, calibration, ...) is copied verbatim:
-the workflow interpolates these coordinate-indexed tables, and the cropped grid
-is a subset of their domain.
+(``dopplerCentroid``, ``referenceTerrainHeight``) are coordinate-indexed tables
+the workflow interpolates, and the cropped swath is a subset of their domain, so a
+full copy is valid -- the GUNW regenerates its geometry cube from the output
+geocode grid and reads the radar grid from ``swaths``, so neither needs these
+grids cropped today.
+
+This is tied to which RSLC layers the current RSLC->GUNW workflow actually reads.
+If a future processing change starts deriving GUNW layers from one of these grids,
+or adds new radar-coordinate layers to the RSLC, this crop would need to be
+extended to cover them.
 """
 
 import logging
@@ -62,13 +79,6 @@ def _padded_slice(axis: np.ndarray, lo: float, hi: float, margin: int) -> tuple[
     i0, i1 = np.searchsorted(axis, [lo, hi])
     # Pad each side and clamp to the axis bounds.
     return int(max(0, i0 - margin)), int(min(len(axis), i1 + margin))
-
-
-def _bracket(axis: np.ndarray, lo: float, hi: float) -> tuple[int, int]:
-    """Return the (start, stop) slice bracketing [lo, hi] on an axis (one node outside each side)."""
-    return max(0, int(np.searchsorted(axis, lo, 'right')) - 1), min(
-        len(axis), int(np.searchsorted(axis, hi, 'left')) + 1
-    )
 
 
 def _solve_aoi_corners(
@@ -129,19 +139,26 @@ def aoi_to_radar_window(
     bbox_wgs84: list[float],
     dem_file: str | Path,
     margin: int = 512,
+    az_looks: int = 16,
+    rg_looks: int = 7,
 ) -> dict[str, tuple[int, int]]:
     """Find the radar-coordinate crop window for ``bbox_wgs84`` in one RSLC.
 
     Solves the four AOI corners into the radar grid with isce3 ``geo2rdr`` at
     their DEM heights, then maps the bounding (azimuth time, slant range) extent
     onto the swath axes. The window is independent per RSLC -- the AOI maps to
-    different lines/pixels in each acquisition.
+    different lines/pixels in each acquisition. The window start is snapped down to
+    a multiple of the multilook looks so the crop's multilook cells line up with a
+    full-frame run (see module docstring). An AOI that overruns the swath is clamped
+    to the overlap with a warning.
 
     Args:
         slc: Open NISAR RSLC reader.
         bbox_wgs84: AOI bounding box [lon_min, lat_min, lon_max, lat_max] in WGS84 degrees.
         dem_file: Path of a DEM GeoTIFF in WGS84 (lon/lat) used for corner heights.
         margin: Padding in frequencyA samples / azimuth lines added on every side.
+        az_looks: Azimuth multilook looks; the window start line is floored to a multiple of it.
+        rg_looks: Range multilook looks; each frequency's window start sample is floored to a multiple of it.
 
     Returns:
         window: Dict of {'az': (a0, a1), 'frequencyA': (p0, p1), ...} index slices.
@@ -165,8 +182,20 @@ def aoi_to_radar_window(
     # from its own slantRange axis covering the same physical AOI extent).
     a_lo, a_hi = min(az_times), max(az_times)
     r_lo, r_hi = min(slant_ranges), max(slant_ranges)
-    window = {'az': _padded_slice(swath_t, a_lo, a_hi, margin)}
-    window |= {fr: _padded_slice(slant_axes[fr], r_lo, r_hi, margin) for fr in freq_groups}
+    if (
+        a_lo < swath_t[0]
+        or a_hi > swath_t[-1]
+        or any(r_lo < slant_axes[fr][0] or r_hi > slant_axes[fr][-1] for fr in freq_groups)
+    ):
+        log.warning('AOI extends past the swath of %s; cropping to the overlap.', Path(slc.filename).name)
+
+    # Floor the window start to a multiple of the looks (multilook alignment; see module docstring).
+    # rg_looks is the single crossmul range looks, applied to every frequency's own grid.
+    a0, a1 = _padded_slice(swath_t, a_lo, a_hi, margin)
+    window = {'az': ((a0 // az_looks) * az_looks, a1)}
+    for fr in freq_groups:
+        p0, p1 = _padded_slice(slant_axes[fr], r_lo, r_hi, margin)
+        window[fr] = ((p0 // rg_looks) * rg_looks, p1)
 
     a0, a1 = window['az']
     p0, p1 = window['frequencyA']
@@ -205,50 +234,6 @@ def _copy_cropped(src_ds: h5py.Dataset, dst_grp: h5py.Group, name: str, slices: 
     return d
 
 
-def _crop_grid_group(
-    src_grp: h5py.Group, dst_grp: h5py.Group, az_lo: float, az_hi: float, rg_lo: float, rg_hi: float
-) -> None:
-    """Crop a radar-coordinate metadata grid group (geolocationGrid, processingInformation/parameters).
-
-    The group has its own 1-D ``zeroDopplerTime``/``slantRange`` axes; data layers
-    are indexed by them (1-D on whichever axis matches, or on their trailing two
-    dims). Nested grid subgroups (e.g. ``frequency{A,B}``) are cropped recursively.
-    Axes are *bracketed* (one node outside the swath extent each side) so the
-    cropped grid still spans the swath.
-    """
-    grid_az = src_grp['zeroDopplerTime'][()]
-    grid_rg = src_grp['slantRange'][()]
-    n_az, n_rg = len(grid_az), len(grid_rg)
-    gz0, gz1 = _bracket(grid_az, az_lo, az_hi)
-    gs0, gs1 = _bracket(grid_rg, rg_lo, rg_hi)
-
-    _copy_attrs(src_grp, dst_grp)
-    for key, item in src_grp.items():
-        if isinstance(item, h5py.Group):
-            # A nested grid group (its own axes) is cropped recursively; anything
-            # else (no axes) is copied verbatim.
-            if 'zeroDopplerTime' in item and 'slantRange' in item:
-                _crop_grid_group(item, dst_grp.create_group(key), az_lo, az_hi, rg_lo, rg_hi)
-            else:
-                src_grp.copy(key, dst_grp, name=key)
-        elif key == 'zeroDopplerTime':
-            _copy_cropped(item, dst_grp, key, (slice(gz0, gz1),))
-        elif key == 'slantRange':
-            _copy_cropped(item, dst_grp, key, (slice(gs0, gs1),))
-        elif key == 'heightAboveEllipsoid':
-            src_grp.copy(key, dst_grp, name=key)  # height axis -> not az/range indexed
-        elif item.ndim >= 2 and item.shape[-2] == n_az and item.shape[-1] == n_rg:
-            sl = (slice(None),) * (item.ndim - 2) + (slice(gz0, gz1), slice(gs0, gs1))
-            _copy_cropped(item, dst_grp, key, sl)
-        elif item.ndim == 1 and item.shape[0] == n_az:
-            _copy_cropped(item, dst_grp, key, (slice(gz0, gz1),))  # az-indexed 1-D, e.g. referenceTerrainHeight
-        elif item.ndim == 1 and item.shape[0] == n_rg:
-            _copy_cropped(item, dst_grp, key, (slice(gs0, gs1),))
-        else:
-            # epsg, chirp weightings, run-config string, etc. -> not on the radar grid.
-            src_grp.copy(key, dst_grp, name=key)
-
-
 def _update_identification_times(
     dst: h5py.File, identification_path: str, units_attr: object, t0: float, t1: float
 ) -> None:
@@ -270,17 +255,23 @@ def _update_identification_times(
         dst[path][...] = value.encode() if isinstance(sample, bytes) else value
 
 
-def _bounding_polygon_wkt(geoloc_grp: h5py.Group) -> str:
-    """WKT footprint quad from a cropped geolocationGrid's corner lon/lat nodes.
+def _bounding_polygon_wkt(geoloc_grp: h5py.Group, az_lo: float, az_hi: float, rg_lo: float, rg_hi: float) -> str:
+    """WKT footprint quad for the cropped swath, from the (full) geolocationGrid.
 
-    The grid's ``coordinateX``/``coordinateY`` are lon/lat (EPSG:4326); the four
-    corner nodes at a mid height level trace the cropped swath outline.
+    The grid is copied verbatim, so its ``coordinateX``/``coordinateY`` (lon/lat,
+    EPSG:4326) still span the whole frame. Window its own axes to one node outside
+    the cropped (azimuth time, slant range) extent and trace the corner nodes at a
+    mid height level to outline just the cropped swath.
     """
+    a0, a1 = _padded_slice(geoloc_grp['zeroDopplerTime'][()], az_lo, az_hi, margin=1)
+    r0, r1 = _padded_slice(geoloc_grp['slantRange'][()], rg_lo, rg_hi, margin=1)
     lon = geoloc_grp['coordinateX'][()]  # (height, azimuth, range), degrees
     lat = geoloc_grp['coordinateY'][()]
     h = lon.shape[0] // 2  # representative height level
-    corners = [(lon[h, a, r], lat[h, a, r]) for a, r in ((0, 0), (0, -1), (-1, -1), (-1, 0), (0, 0))]
-    return 'POLYGON ((' + ', '.join(f'{x:.6f} {y:.6f}' for x, y in corners) + '))'
+    a1, r1 = a1 - 1, r1 - 1  # last in-range node indices
+    corners = [(a0, r0), (a0, r1), (a1, r1), (a1, r0), (a0, r0)]
+    pts = [(lon[h, a, r], lat[h, a, r]) for a, r in corners]
+    return 'POLYGON ((' + ', '.join(f'{x:.6f} {y:.6f}' for x, y in pts) + '))'
 
 
 def _set_bounding_polygon(dst: h5py.File, identification_path: str, wkt: str) -> None:
@@ -299,20 +290,20 @@ def _set_bounding_polygon(dst: h5py.File, identification_path: str, wkt: str) ->
         d.attrs[k] = v
 
 
-def _mirror_except(src: h5py.Group, dst: h5py.Group, prune: set[str]) -> None:
-    """Copy ``src`` into ``dst`` verbatim, skipping the ``prune`` subtrees (root-relative paths).
+def _copy_except(src: h5py.Group, dst: h5py.Group, skip: set[str]) -> None:
+    """Copy ``src`` into ``dst`` verbatim, skipping the ``skip`` subtrees (root-relative paths).
 
-    Pruned objects are left for the caller to fill in cropped, but their parent
+    Skipped objects are left for the caller to fill in cropped, but their parent
     groups are created. Everything else is copied wholesale in one HDF5 call,
     preserving attrs/dtype/fill value without reading big arrays into Python.
     """
     _copy_attrs(src, dst)
     for name, item in src.items():
         path = item.name.lstrip('/')
-        if path in prune:
+        if path in skip:
             continue  # caller fills this in with a cropped version
-        if isinstance(item, h5py.Group) and any(p.startswith(f'{path}/') for p in prune):
-            _mirror_except(item, dst.create_group(name), prune)  # an ancestor of a pruned path
+        if isinstance(item, h5py.Group) and any(s.startswith(f'{path}/') for s in skip):
+            _copy_except(item, dst.create_group(name), skip)  # an ancestor of a skipped path
         else:
             src.copy(name, dst, name=name)
 
@@ -361,9 +352,9 @@ def crop_rslc(
 ) -> Path:
     """Write a cropped copy of an RSLC using a radar window.
 
-    The whole product is mirrored verbatim except the two radar-coordinate
-    subtrees (``swaths`` and ``geolocationGrid``), which are filled in cropped.
-    Identification times are restamped to the cropped extent last.
+    The whole product is copied verbatim except the ``swaths`` subtree (the image
+    grids), which is filled in cropped. Identification times and the bounding
+    polygon are restamped to the cropped extent last.
 
     Args:
         src_h5: Path of the source RSLC h5 file.
@@ -382,31 +373,28 @@ def crop_rslc(
         root = f'science/{_band(src)}'
         swaths = f'{root}/RSLC/swaths'
         geoloc = f'{root}/RSLC/metadata/geolocationGrid'
-        params = f'{root}/RSLC/metadata/processingInformation/parameters'
         identification = f'{root}/identification'
 
-        # Copy everything verbatim except the radar-coordinate subtrees, creating
-        # their parent groups so the cropped versions can attach.
-        _mirror_except(src, dst, {swaths, geoloc, params})
+        # Copy everything verbatim except the swaths image subtree (filled in cropped
+        # below); the metadata grids are left full -- see the module docstring.
+        _copy_except(src, dst, {swaths})
 
-        # Cropped-swath extent, used to bracket the geolocation grid and restamp
-        # the identification times.
+        # Cropped-swath extent, used to outline the footprint and restamp the
+        # identification times.
         swath_t = src[f'{swaths}/zeroDopplerTime']
         slant_a = src[f'{swaths}/frequencyA/slantRange'][()]
         az_lo, az_hi = float(swath_t[a0]), float(swath_t[a1 - 1])
         rg_lo, rg_hi = float(slant_a[p0a]), float(slant_a[p1a - 1])
 
-        # Fill the pruned subtrees with their cropped contents.
+        # Fill the pruned swaths subtree with its cropped contents.
         _crop_swaths_group(src[swaths], dst.create_group(swaths), window, polarizations)
-        _crop_grid_group(src[geoloc], dst.create_group(geoloc), az_lo, az_hi, rg_lo, rg_hi)
-        _crop_grid_group(src[params], dst.create_group(params), az_lo, az_hi, rg_lo, rg_hi)
 
         # Restamp identification times and footprint to the cropped extent (the
         # GUNW writer copies both straight from the reference RSLC).
         time_units = swath_t.attrs.get('units')
         if time_units is not None:
             _update_identification_times(dst, identification, time_units, az_lo, az_hi)
-        _set_bounding_polygon(dst, identification, _bounding_polygon_wkt(dst[geoloc]))
+        _set_bounding_polygon(dst, identification, _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi))
     log.info('Wrote cropped RSLC: %s', dst_h5)
     return dst_h5
 
@@ -417,13 +405,17 @@ def crop_rslc_pair(
     bbox_wgs84: list[float],
     dem_file: str | Path,
     out_dir: str | Path,
-    margin: int = 512,
+    margin: int,
+    az_looks: int,
+    rg_looks: int,
 ) -> tuple[str, str]:
     """Crop a reference/secondary RSLC pair to the AOI radar window.
 
     Each file's window is solved independently from its own orbit (the AOI maps to
     different lines/pixels in each acquisition); ``margin`` guards processing edge
-    effects (filter kernels, coregistration search).
+    effects (filter kernels, coregistration search). ``az_looks``/``rg_looks`` must
+    match the InSAR multilook looks so each crop's multilook cells align with a
+    full-frame run.
 
     Args:
         reference_rslc: Path of the reference RSLC h5 file.
@@ -432,6 +424,8 @@ def crop_rslc_pair(
         dem_file: Path of a DEM GeoTIFF in WGS84 used for corner heights.
         out_dir: Directory to write the cropped RSLCs into.
         margin: Padding in frequencyA samples / azimuth lines added on every side.
+        az_looks: Azimuth multilook looks (the InSAR crossmul value); window starts are floored to it.
+        rg_looks: Range multilook looks (the InSAR crossmul value); window starts are floored to it.
 
     Returns:
         paths: (ref_sub_path, sec_sub_path) of the cropped RSLCs.
@@ -439,11 +433,14 @@ def crop_rslc_pair(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    def crop_one(src: str | Path) -> str:
+    def crop_one(src: str | Path, ref_or_sec: str) -> str:
         slc = SLC(hdf5file=str(src))  # one reader per file, shared by both steps
-        window = aoi_to_radar_window(slc, bbox_wgs84, dem_file, margin)
+        try:
+            window = aoi_to_radar_window(slc, bbox_wgs84, dem_file, margin, az_looks, rg_looks)
+        except (ValueError, RuntimeError) as e:
+            raise ValueError(f'AOI does not fit the {ref_or_sec} RSLC {Path(src).name}: {e}') from e
         dst = out_dir / f'{Path(src).stem}_sub.h5'
         crop_rslc(src, dst, window, get_polarizations(slc))
         return str(dst)
 
-    return crop_one(reference_rslc), crop_one(secondary_rslc)
+    return crop_one(reference_rslc, 'reference'), crop_one(secondary_rslc, 'secondary')

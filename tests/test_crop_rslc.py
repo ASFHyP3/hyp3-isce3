@@ -6,6 +6,7 @@ directly and the writer (`crop_rslc`) against a synthetic RSLC. These tests don'
 call isce3, though importing the module does (isce3/nisar are imported at top).
 """
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,10 +17,9 @@ import pytest
 from hyp3_isce3 import crop_rslc as crop_mod
 from hyp3_isce3.crop_rslc import (
     _band,
-    _bracket,
     _check_epoch_alignment,
     _copy_attrs,
-    _mirror_except,
+    _copy_except,
     _padded_slice,
     crop_rslc,
     crop_rslc_pair,
@@ -155,6 +155,55 @@ class TestWindowMath:
             _padded_slice(np.array([0.0, 2.0, 1.0, 3.0]), 0.0, 3.0, MARGIN)
 
 
+class TestAoiToRadarWindow:
+    """The window solve with the geo2rdr corner solve stubbed: snap-to-looks and overrun warning."""
+
+    @staticmethod
+    def _stub_slc(rslc_h5):
+        # Only the attributes aoi_to_radar_window touches; geo2rdr is stubbed so the
+        # radar grid just needs a sensing_start matching the swath epoch (SWATH_T[0]=0).
+        return SimpleNamespace(
+            getRadarGrid=lambda freq: SimpleNamespace(sensing_start=0.0),
+            getOrbit=lambda: None,
+            frequencies=['A', 'B'],
+            filename=str(rslc_h5),
+        )
+
+    def test_window_start_floored_to_looks(self, rslc_h5, monkeypatch):
+        # Corners -> az 30-50, range 36-60 -> padded (26,54)/(32,64); starts floor
+        # to a multiple of the looks: 26 -> 16 (az 16), 32 -> 28 (rg 7).
+        monkeypatch.setattr(
+            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+        )
+        window = crop_mod.aoi_to_radar_window(
+            self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=16, rg_looks=7
+        )
+        assert window['az'] == (16, 54)
+        assert window['frequencyA'] == (28, 64)
+        # rg_looks is applied to every frequency's own grid: freqB padded (1,12) -> start floored to 0.
+        assert window['frequencyB'] == (0, 12)
+
+    def test_looks_of_one_is_no_snap(self, rslc_h5, monkeypatch):
+        monkeypatch.setattr(
+            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+        )
+        window = crop_mod.aoi_to_radar_window(
+            self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=1, rg_looks=1
+        )
+        assert window['az'] == (26, 54) and window['frequencyA'] == (32, 64)
+
+    def test_overrun_warns(self, rslc_h5, monkeypatch, caplog):
+        # Range extent reaches below the swath start -> clamped, with a warning.
+        monkeypatch.setattr(
+            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [-10.0, -10.0, 60.0, 60.0])
+        )
+        with caplog.at_level(logging.WARNING):
+            crop_mod.aoi_to_radar_window(
+                self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=16, rg_looks=7
+            )
+        assert 'extends past the swath' in caplog.text
+
+
 class TestCropRslc:
     def test_shapes_and_axes(self, rslc_h5, tmp_path):
         dst = tmp_path / 'out.h5'
@@ -213,16 +262,14 @@ class TestCropRslc:
             assert ds.compression == 'gzip'
             assert ds.chunks is not None
 
-    def test_geolocation_grid_bracketed(self, rslc_h5, tmp_path):
+    def test_geolocation_grid_copied_verbatim(self, rslc_h5, tmp_path):
         dst = tmp_path / 'out.h5'
         crop_rslc(rslc_h5, dst, EXPECTED_WINDOW, POLARIZATIONS)
         with h5py.File(dst, 'r') as f:
-            # Own axes bracketed to span the cropped swath extent.
-            np.testing.assert_array_equal(f[f'{_GEOLOC}/zeroDopplerTime'][()], GRID_AZ[EXPECTED_GRID_SLICE])
-            np.testing.assert_array_equal(f[f'{_GEOLOC}/slantRange'][()], GRID_RG[EXPECTED_GRID_SLICE])
-            # 3-D coordinate layer sliced on its trailing (az, range) dims only.
-            assert f[f'{_GEOLOC}/coordinateX'].shape == (N_H, 5, 5)
-            # Height axis and epsg are not on the radar grid -> untouched.
+            # Copied whole -- the workflow interpolates it and the GUNW regenerates its own cube.
+            np.testing.assert_array_equal(f[f'{_GEOLOC}/zeroDopplerTime'][()], GRID_AZ)
+            np.testing.assert_array_equal(f[f'{_GEOLOC}/slantRange'][()], GRID_RG)
+            assert f[f'{_GEOLOC}/coordinateX'].shape == (N_H, N_AZG, N_RGG)
             np.testing.assert_array_equal(f[f'{_GEOLOC}/heightAboveEllipsoid'][()], GRID_HEIGHTS)
             assert f[f'{_GEOLOC}/epsg'][()] == 4326
 
@@ -233,18 +280,16 @@ class TestCropRslc:
             assert f['science/LSAR/identification/zeroDopplerStartTime'][()].decode() == EXPECTED_START
             assert f['science/LSAR/identification/zeroDopplerEndTime'][()].decode() == EXPECTED_END
 
-    def test_processing_parameters_cubes_cropped(self, rslc_h5, tmp_path):
+    def test_processing_parameters_copied_verbatim(self, rslc_h5, tmp_path):
         dst = tmp_path / 'out.h5'
         crop_rslc(rslc_h5, dst, EXPECTED_WINDOW, POLARIZATIONS)
         pp = 'science/LSAR/RSLC/metadata/processingInformation/parameters'
         with h5py.File(dst, 'r') as f:
-            # Own grid axes + the 1-D az layer bracketed to [2:7].
-            np.testing.assert_array_equal(f[f'{pp}/zeroDopplerTime'][()], GRID_AZ[EXPECTED_GRID_SLICE])
-            np.testing.assert_array_equal(f[f'{pp}/slantRange'][()], GRID_RG[EXPECTED_GRID_SLICE])
-            assert f[f'{pp}/referenceTerrainHeight'].shape == (5,)
-            # Nested per-frequency dopplerCentroid cropped on both az and range.
-            assert f[f'{pp}/frequencyA/dopplerCentroid'].shape == (5, 5)
-            # A non-grid 1-D array (chirp weighting) is left untouched.
+            # The whole parameters group (incl. dopplerCentroid, referenceTerrainHeight) is copied as is.
+            np.testing.assert_array_equal(f[f'{pp}/zeroDopplerTime'][()], GRID_AZ)
+            np.testing.assert_array_equal(f[f'{pp}/slantRange'][()], GRID_RG)
+            assert f[f'{pp}/referenceTerrainHeight'].shape == (N_AZG,)
+            assert f[f'{pp}/frequencyA/dopplerCentroid'].shape == (N_AZG, N_RGG)
             assert f[f'{pp}/rangeChirpWeighting'].shape == (8,)
 
     def test_bounding_polygon_recomputed(self, rslc_h5, tmp_path):
@@ -272,7 +317,14 @@ class TestCropPair:
         # bbox_wgs84/dem_file are unused here (the window solve is stubbed above),
         # but pass type-valid values so static analysis is happy.
         ref_sub, sec_sub = crop_rslc_pair(
-            rslc_h5, sec, bbox_wgs84=[0.0, 0.0, 0.0, 0.0], dem_file='', out_dir=tmp_path / 'subs', margin=MARGIN
+            rslc_h5,
+            sec,
+            bbox_wgs84=[0.0, 0.0, 0.0, 0.0],
+            dem_file='',
+            out_dir=tmp_path / 'subs',
+            margin=MARGIN,
+            az_looks=16,
+            rg_looks=7,
         )
         for p in (ref_sub, sec_sub):
             assert Path(p).exists()
@@ -280,6 +332,27 @@ class TestCropPair:
                 a0, a1 = EXPECTED_WINDOW['az']
                 assert f[f'{_SWATHS}/zeroDopplerTime'].shape == (a1 - a0,)
         assert ref_sub != sec_sub
+
+    def test_window_failure_names_the_rslc(self, rslc_h5, tmp_path, monkeypatch):
+        # An off-swath AOI fails per-file; the error should say which RSLC (ref is first).
+        monkeypatch.setattr(crop_mod, 'SLC', lambda **k: None)
+        monkeypatch.setattr(crop_mod, 'get_polarizations', lambda *a, **k: POLARIZATIONS)
+
+        def fail(*a, **k):
+            raise ValueError('AOI does not overlap')
+
+        monkeypatch.setattr(crop_mod, 'aoi_to_radar_window', fail)
+        with pytest.raises(ValueError, match='reference RSLC'):
+            crop_rslc_pair(
+                rslc_h5,
+                rslc_h5,
+                bbox_wgs84=[0.0, 0.0, 0.0, 0.0],
+                dem_file='',
+                out_dir=tmp_path / 'subs',
+                margin=MARGIN,
+                az_looks=16,
+                rg_looks=7,
+            )
 
 
 class TestBand:
@@ -305,15 +378,17 @@ class TestBand:
             _band(f)
 
 
-class TestBracket:
+class TestPaddedSliceBracket:
+    """``_padded_slice`` with margin=1 is the one-node-outside bracket used for the footprint."""
+
     def test_brackets_extent_one_node_outside(self):
         axis = np.arange(10, dtype='f8') * 10.0  # 0, 10, ..., 90
-        # searchsorted(right, 26)=3 -> 2 ; searchsorted(left, 53)=6 -> 7
-        assert _bracket(axis, 26.0, 53.0) == (2, 7)
+        # searchsorted(26)=3 -> 2 ; searchsorted(53)=6 -> 7
+        assert _padded_slice(axis, 26.0, 53.0, margin=1) == (2, 7)
 
     def test_clamps_to_axis_bounds(self):
         axis = np.arange(10, dtype='f8') * 10.0
-        assert _bracket(axis, -100.0, 1000.0) == (0, 10)
+        assert _padded_slice(axis, -10.0, 1000.0, margin=1) == (0, 10)
 
 
 class TestEpochAlignment:
@@ -348,18 +423,18 @@ def test_copy_attrs(tmp_path):
         assert dst.attrs['scale'] == 2.0
 
 
-def test_mirror_except_prunes_subtree(tmp_path):
+def test_copy_except_skips_subtree(tmp_path):
     src_path, dst_path = tmp_path / 'src.h5', tmp_path / 'dst.h5'
     with h5py.File(src_path, 'w') as f:
         f.attrs['mission'] = 'NISAR'  # root attr -> copied
-        f.create_dataset('a/keep', data=[1, 2])  # sibling of the pruned subtree
-        f.create_dataset('a/drop/x', data=[9])  # inside the pruned subtree
+        f.create_dataset('a/keep', data=[1, 2])  # sibling of the skipped subtree
+        f.create_dataset('a/drop/x', data=[9])  # inside the skipped subtree
         f.create_dataset('top', data=[7])  # unrelated branch
     with h5py.File(src_path, 'r') as src, h5py.File(dst_path, 'w') as dst:
-        _mirror_except(src, dst, {'a/drop'})
+        _copy_except(src, dst, {'a/drop'})
     with h5py.File(dst_path, 'r') as out:
         assert out.attrs['mission'] == 'NISAR'
-        assert 'a' in out  # ancestor of the pruned path is still created
+        assert 'a' in out  # ancestor of the skipped path is still created
         assert 'a/keep' in out  # sibling copied verbatim
         assert 'top' in out  # unrelated branch copied wholesale
-        assert 'a/drop' not in out  # pruned subtree skipped for the caller to fill
+        assert 'a/drop' not in out  # skipped subtree left for the caller to fill

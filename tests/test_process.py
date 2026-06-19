@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from hyp3_isce3.process import get_config, reproject_subset
+from hyp3_isce3.process import get_config, get_crossmul_looks, reproject_subset
 
 
-def test_get_config(mocker, monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)  # get_config writes temp.yaml/insar.yaml to cwd
+def test_get_config(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # get_config writes insar.yaml to cwd
     reference_path = 'REFERENCE_TEST.h5'
     secondary_path = 'SECONDARY_TEST.h5'
 
@@ -20,9 +20,6 @@ def test_get_config(mocker, monkeypatch, tmp_path):
     temp_yaml = Path('temp.yaml')
     temp_yaml.write_text('partial_granule_id:')
 
-    mock_func = mocker.patch('hyp3_isce3.process.download_yaml')
-    mock_func.return_value = temp_yaml
-
     yaml = get_config(
         reference_path,
         secondary_path,
@@ -32,6 +29,7 @@ def test_get_config(mocker, monkeypatch, tmp_path):
         secondary_tropo,
         tec_path,
         watermask,
+        temp_yaml,
     )
     exists_reference = False
     exists_secondary = False
@@ -64,6 +62,14 @@ def test_get_config(mocker, monkeypatch, tmp_path):
     assert 'partial_granule_id:' in lines[-1]
 
 
+def test_get_crossmul_looks(tmp_path):
+    rc = tmp_path / 'rc.yaml'
+    rc.write_text(
+        'runconfig:\n  groups:\n    processing:\n      crossmul:\n        range_looks: 7\n        azimuth_looks: 16\n'
+    )
+    assert get_crossmul_looks(rc) == (16, 7)
+
+
 def test_reproject_subset():
     # AOI straddling the UTM zone 11N central meridian (117W, easting 500000).
     xmin, ymin, xmax, ymax = reproject_subset([-117.1, 46.0, -116.9, 46.2], 32611)
@@ -72,7 +78,7 @@ def test_reproject_subset():
     assert 5_000_000 < ymin < ymax < 5_200_000
 
 
-def test_get_config_subset(mocker, monkeypatch, tmp_path):
+def test_get_config_subset(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     # Downloaded GUNW runconfig tail (from product_path_group on) with the geocode
     # and radar_grid_cubes blocks, plus a dem_download block that uses x/y.
@@ -106,7 +112,6 @@ def test_get_config_subset(mocker, monkeypatch, tmp_path):
         'partial_granule_id: foo\n'
     )
     Path('temp.yaml').write_text(tail)
-    mocker.patch('hyp3_isce3.process.download_yaml', return_value=Path('temp.yaml'))
 
     yaml_path = get_config(
         'REF.h5',
@@ -117,6 +122,7 @@ def test_get_config_subset(mocker, monkeypatch, tmp_path):
         'SECTROP.nc',
         'TEC.json',
         'WMASK.vrt',
+        Path('temp.yaml'),
         subset_utm=(100.0, 200.0, 300.0, 400.0),
         output_epsg=32611,
     )
