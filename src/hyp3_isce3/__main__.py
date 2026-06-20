@@ -1,9 +1,13 @@
 """isce3 processing for HyP3."""
 
 import logging
+import os
+import warnings
 from argparse import ArgumentParser
+from pathlib import Path
 
 from hyp3lib.aws import upload_file_to_s3
+from hyp3lib.fetch import write_credentials_to_netrc_file
 
 from hyp3_isce3.process import process_isce3
 
@@ -71,6 +75,17 @@ def main() -> None:
             args.subset = None
         elif not len(args.subset) == 4:
             raise ValueError('The number of coordinates is not four')
+
+    username = os.getenv('EARTHDATA_USERNAME')
+    password = os.getenv('EARTHDATA_PASSWORD')
+    if username and password:
+        write_credentials_to_netrc_file(username, password, append=False)
+
+    if not (Path.home() / '.netrc').exists():
+        warnings.warn(
+            'Earthdata credentials must be present as environment variables, or in your netrc.',
+            UserWarning,
+        )
 
     reference_granule, secondary_granule = earlier_granule_first(*args.granules)
 

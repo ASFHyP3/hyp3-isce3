@@ -11,6 +11,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - Added a `--subset LON_MIN LAT_MIN LON_MAX LAT_MAX` option that crops the input RSLCs to a WGS84 bounding box before processing, so the InSAR workflow runs on a small radar-coordinate patch (minutes instead of hours for a full frame) and the GUNW output is bounded to that area of interest.
 - Added the `hyp3_isce3.crop_rslc` module, which maps the AOI into each RSLC's radar grid with isce3 `geo2rdr` and writes a cropped RSLC. The cropped product's identification times, `boundingPolygon`, geolocation grid, and `processingInformation` metadata cubes are kept consistent with the crop so the resulting GUNW metadata reflects the AOI.
+- Added authentication function.
 
 ### Changed
 - Changed `reference` and `secondary` parameters for `granules`.
