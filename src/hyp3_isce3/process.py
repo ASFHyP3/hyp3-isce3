@@ -17,7 +17,7 @@ from osgeo import ogr, osr
 from pyproj import Transformer
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import crop_rslc_pair
+from hyp3_isce3.crop_rslc import crop_streamed, stream_skeleton
 
 
 asf.constants.INTERNAL.CMR_TIMEOUT = 90
@@ -386,8 +386,14 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     product_id = get_product_id(reference_scene, secondary_scene)
 
     earthaccess.login()
-    reference_path = download_rslc(reference_scene)
-    secondary_path = download_rslc(secondary_scene)
+    if subset:
+        # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
+        # product in every pre-crop step, and the image window is streamed by crop_streamed.
+        reference_path = str(stream_skeleton(reference_scene))
+        secondary_path = str(stream_skeleton(secondary_scene))
+    else:
+        reference_path = download_rslc(reference_scene)
+        secondary_path = download_rslc(secondary_scene)
 
     watermask = get_watermask(reference_path)
 
@@ -412,15 +418,13 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     if subset:
         subset_utm = reproject_subset(subset, epsg_code)
         az_looks, rg_looks = get_crossmul_looks(template_yaml)
-        reference_path, secondary_path = crop_rslc_pair(
-            reference_path,
-            secondary_path,
-            subset,
-            dem_path,
-            out_dir='.',
-            margin=512,
-            az_looks=az_looks,
-            rg_looks=rg_looks,
+        # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
+        # independently from its own orbit; only overlapping image chunks are pulled.
+        reference_path = crop_streamed(
+            reference_scene, reference_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
+        )
+        secondary_path = crop_streamed(
+            secondary_scene, secondary_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
         )
 
     yaml_path = get_config(
