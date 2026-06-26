@@ -404,7 +404,7 @@ class TestCropFromHandle:
             crop_rslc_from_handle(src, via_handle, EXPECTED_WINDOW, POLARIZATIONS)
 
         def datasets(h5):
-            out = {}
+            out: dict = {}
             h5.visititems(lambda n, o: out.__setitem__(n, o[()]) if isinstance(o, h5py.Dataset) else None)
             return out
 
