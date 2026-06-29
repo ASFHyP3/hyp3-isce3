@@ -44,6 +44,7 @@ extended to cover them.
 """
 
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -51,7 +52,9 @@ import earthaccess
 import h5py
 import isce3
 import numpy as np
+import yaml
 from nisar.products.readers import SLC
+from pyproj import Transformer
 
 
 log = logging.getLogger(__name__)
@@ -80,6 +83,18 @@ def _padded_slice(axis: np.ndarray, lo: float, hi: float, margin: int) -> tuple[
     i0, i1 = np.searchsorted(axis, [lo, hi])
     # Pad each side and clamp to the axis bounds.
     return int(max(0, i0 - margin)), int(min(len(axis), i1 + margin))
+
+
+def _snap_to_grid(value: float, step: float, origin: float = 0, expand_up: bool = False) -> float:
+    """Snap ``value`` onto the lattice ``origin + k * step``.
+
+    Floors to the node at or below ``value`` (or ceils to the node at or above it when
+    ``expand_up``). Both crops snap to a grid so the cropped output's cells coincide with a
+    full-frame run's: the radar window to the multilook looks (``origin`` 0), the geocode box
+    to the posting (``origin`` the runconfig anchor). Integer ``value``/``step`` give an int.
+    """
+    round_to_node = math.ceil if expand_up else math.floor
+    return origin + round_to_node((value - origin) / step) * step
 
 
 def _solve_aoi_corners(
@@ -193,15 +208,64 @@ def aoi_to_radar_window(
     # Floor the window start to a multiple of the looks (multilook alignment; see module docstring).
     # rg_looks is the single crossmul range looks, applied to every frequency's own grid.
     a0, a1 = _padded_slice(swath_t, a_lo, a_hi, margin)
-    window = {'az': ((a0 // az_looks) * az_looks, a1)}
+    window = {'az': (_snap_to_grid(a0, az_looks), a1)}
     for fr in freq_groups:
         p0, p1 = _padded_slice(slant_axes[fr], r_lo, r_hi, margin)
-        window[fr] = ((p0 // rg_looks) * rg_looks, p1)
+        window[fr] = (_snap_to_grid(p0, rg_looks), p1)
 
     a0, a1 = window['az']
     p0, p1 = window['frequencyA']
     log.info('Radar window %s: az %d lines, frequencyA %d px', Path(slc.filename).name, a1 - a0, p1 - p0)
     return window
+
+
+def geocode_subset_box(
+    subset: list[float], epsg_code: int, template_yaml: str | Path
+) -> tuple[float, float, float, float]:
+    """Reproject the WGS84 AOI to the output UTM box and snap it onto the full-frame geocode grid.
+
+    Two steps that together produce the geocode output box. First reproject the lon/lat AOI
+    into ``epsg_code`` meters. Then expand the box outward onto the runconfig's geocode lattice:
+    isce3 posts every geocoded layer from the ``geocode.top_left`` anchor (each layer's first
+    pixel center lands at ``anchor + posting/2``), so a full-frame run falls on a fixed lattice.
+    A subset must share that lattice or its geocoded pixel centers sit a fraction of a pixel off
+    the full-frame's, which re-rolls the speckle realization in decorrelated areas (coherent
+    areas, being smooth, still match). Two runs coincide iff their input ``top_left`` are
+    congruent modulo the coarsest posting, so we snap the corners to ``anchor + k * posting`` --
+    finer layers, whose posting divides it, then align too. This is the geocode-grid analog of
+    the radar-window snap in :func:`aoi_to_radar_window`; sourcing anchor/posting from the
+    runconfig the workflow runs keeps them from drifting.
+
+    Args:
+        subset: AOI bounding box [lon_min, lat_min, lon_max, lat_max] in WGS84 degrees.
+        epsg_code: Output UTM EPSG code; must match the template's geocode projection.
+        template_yaml: Path of the downloaded JPL runconfig (from ``process.download_yaml``).
+
+    Returns:
+        subset_utm: (xmin, ymin, xmax, ymax) box in UTM meters, snapped to the geocode grid.
+    """
+    # Reproject the lon/lat rectangle to UTM; transform_bounds densifies the edges so the
+    # returned box encloses it even where the boundary bulges between corners.
+    transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_code}', always_xy=True)
+    xmin, ymin, xmax, ymax = transformer.transform_bounds(*subset)
+
+    geocode = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['geocode']
+    if int(geocode['output_epsg']) != epsg_code:
+        log.warning(
+            'Subset EPSG %d != template geocode EPSG %s; skipping grid snap.', epsg_code, geocode['output_epsg']
+        )
+        return xmin, ymin, xmax, ymax
+
+    ax, ay = float(geocode['top_left']['x_abs']), float(geocode['top_left']['y_abs'])
+    px = float(geocode['output_posting']['A']['x_posting'])  # coarsest posting; finer layers divide it
+    py = float(geocode['output_posting']['A']['y_posting'])
+
+    # Snap each corner to anchor + integer*posting, expanding outward to keep full AOI coverage.
+    xmin = _snap_to_grid(xmin, px, ax)
+    xmax = _snap_to_grid(xmax, px, ax, expand_up=True)
+    ymin = _snap_to_grid(ymin, py, ay)
+    ymax = _snap_to_grid(ymax, py, ay, expand_up=True)
+    return xmin, ymin, xmax, ymax
 
 
 def get_polarizations(slc: SLC) -> dict[str, list[str]]:

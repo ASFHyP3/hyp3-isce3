@@ -14,10 +14,9 @@ from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import ogr, osr
-from pyproj import Transformer
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import crop_streamed, stream_skeleton
+from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
 
 
 asf.constants.INTERNAL.CMR_TIMEOUT = 90
@@ -313,23 +312,6 @@ def get_epsg(lat: float, lon: float) -> int:
     return epsg_base + zone_number
 
 
-def reproject_subset(subset: list[float], epsg_code: int) -> tuple[float, float, float, float]:
-    """Reproject a WGS84 lon/lat subset box to the output UTM projection.
-
-    Args:
-        subset: WGS84 bounding box as [lon_min, lat_min, lon_max, lat_max].
-        epsg_code: Output UTM EPSG code.
-
-    Returns:
-        bbox: Enclosing (xmin, ymin, xmax, ymax) box in UTM meters.
-    """
-    lon_min, lat_min, lon_max, lat_max = subset
-    # transform_bounds densifies the edges, so the returned box encloses the
-    # reprojected lon/lat rectangle even where its boundary bulges between corners.
-    transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_code}', always_xy=True)
-    return transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
-
-
 def get_scene_polygon(reference_path: str, subset: list[float] | None = None) -> ogr.Geometry:
     """Get Polygon for reference scene.
 
@@ -433,7 +415,10 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
     subset_utm = None
     if subset:
-        subset_utm = reproject_subset(subset, epsg_code)
+        # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
+        # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
+        # decorrelated areas).
+        subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
         az_looks, rg_looks = get_crossmul_looks(template_yaml)
         # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.

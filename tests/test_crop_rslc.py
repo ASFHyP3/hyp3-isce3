@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import h5py
 import numpy as np
 import pytest
+from pyproj import Transformer
 
 from hyp3_isce3 import crop_rslc as crop_mod
 from hyp3_isce3.crop_rslc import (
@@ -22,6 +23,7 @@ from hyp3_isce3.crop_rslc import (
     _padded_slice,
     crop_rslc,
     crop_rslc_from_handle,
+    geocode_subset_box,
     get_polarizations,
     write_skeleton,
 )
@@ -456,3 +458,39 @@ class TestWriteSkeleton:
         with h5py.File(rslc_h5, 'r') as src:
             write_skeleton(src, skel)
         assert skel.stat().st_size < rslc_h5.stat().st_size
+
+
+def _geocode_template(tmp_path, epsg=32637, ax=604080.0, ay=1588320.0, posting=80):
+    rc = tmp_path / 'rc.yaml'
+    rc.write_text(
+        'runconfig:\n  groups:\n    processing:\n      geocode:\n'
+        f'        output_epsg: {epsg}\n'
+        f'        top_left: {{x_abs: {ax}, y_abs: {ay}}}\n'
+        f'        output_posting: {{A: {{x_posting: {posting}, y_posting: {posting}}}}}\n'
+    )
+    return rc
+
+
+def test_geocode_subset_box(tmp_path):
+    rc = _geocode_template(tmp_path)  # EPSG 32637, anchor (604080, 1588320), 80 m posting
+    # Erta Ale AOI -> UTM zone 37N; its reprojected corners land off the 80 m lattice.
+    aoi = [40.55, 13.46, 40.78, 13.65]
+    xmin, ymin, xmax, ymax = geocode_subset_box(aoi, 32637, rc)
+    # Every corner is congruent to the anchor modulo the posting (same grid as a full-frame run).
+    assert (xmin - 604080.0) % 80 == 0
+    assert (xmax - 604080.0) % 80 == 0
+    assert (ymin - 1588320.0) % 80 == 0
+    assert (ymax - 1588320.0) % 80 == 0
+    # The snapped box is valid and only ever grows outward past the raw reprojected AOI.
+    rxmin, rymin, rxmax, rymax = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True).transform_bounds(*aoi)
+    assert xmin <= rxmin and xmax >= rxmax
+    assert ymin <= rymin and ymax >= rymax
+
+
+def test_geocode_subset_box_epsg_mismatch(tmp_path):
+    rc = _geocode_template(tmp_path, epsg=32636)  # template projection != requested EPSG below
+    aoi = [40.55, 13.46, 40.78, 13.65]
+    # Mismatched projection: the anchor is in a different CRS, so the box is reprojected but
+    # left un-snapped (returned as the raw transform_bounds result in the requested EPSG).
+    box = geocode_subset_box(aoi, 32637, rc)
+    assert box == Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True).transform_bounds(*aoi)
