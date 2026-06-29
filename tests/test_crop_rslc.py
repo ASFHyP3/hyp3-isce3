@@ -482,7 +482,8 @@ def test_geocode_subset_box(tmp_path):
     assert (ymin - 1588320.0) % 80 == 0
     assert (ymax - 1588320.0) % 80 == 0
     # The snapped box is valid and only ever grows outward past the raw reprojected AOI.
-    rxmin, rymin, rxmax, rymax = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True).transform_bounds(*aoi)
+    transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True)
+    rxmin, rymin, rxmax, rymax = transformer.transform_bounds(aoi[0], aoi[1], aoi[2], aoi[3])
     assert xmin <= rxmin and xmax >= rxmax
     assert ymin <= rymin and ymax >= rymax
 
@@ -493,4 +494,5 @@ def test_geocode_subset_box_epsg_mismatch(tmp_path):
     # Mismatched projection: the anchor is in a different CRS, so the box is reprojected but
     # left un-snapped (returned as the raw transform_bounds result in the requested EPSG).
     box = geocode_subset_box(aoi, 32637, rc)
-    assert box == Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True).transform_bounds(*aoi)
+    transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True)
+    assert box == transformer.transform_bounds(aoi[0], aoi[1], aoi[2], aoi[3])

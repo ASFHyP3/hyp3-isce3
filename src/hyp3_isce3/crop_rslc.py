@@ -208,10 +208,10 @@ def aoi_to_radar_window(
     # Floor the window start to a multiple of the looks (multilook alignment; see module docstring).
     # rg_looks is the single crossmul range looks, applied to every frequency's own grid.
     a0, a1 = _padded_slice(swath_t, a_lo, a_hi, margin)
-    window = {'az': (_snap_to_grid(a0, az_looks), a1)}
+    window = {'az': (int(_snap_to_grid(a0, az_looks)), a1)}
     for fr in freq_groups:
         p0, p1 = _padded_slice(slant_axes[fr], r_lo, r_hi, margin)
-        window[fr] = (_snap_to_grid(p0, rg_looks), p1)
+        window[fr] = (int(_snap_to_grid(p0, rg_looks)), p1)
 
     a0, a1 = window['az']
     p0, p1 = window['frequencyA']
@@ -246,8 +246,9 @@ def geocode_subset_box(
     """
     # Reproject the lon/lat rectangle to UTM; transform_bounds densifies the edges so the
     # returned box encloses it even where the boundary bulges between corners.
+    lon_min, lat_min, lon_max, lat_max = subset
     transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_code}', always_xy=True)
-    xmin, ymin, xmax, ymax = transformer.transform_bounds(*subset)
+    xmin, ymin, xmax, ymax = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
 
     geocode = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['geocode']
     if int(geocode['output_epsg']) != epsg_code:
