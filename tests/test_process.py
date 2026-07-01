@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hyp3_isce3.process import get_config, get_crossmul_looks, reproject_subset
+from hyp3_isce3.process import get_config, get_crossmul_looks
 
 
 def test_get_config(monkeypatch, tmp_path):
@@ -68,14 +68,6 @@ def test_get_crossmul_looks(tmp_path):
         'runconfig:\n  groups:\n    processing:\n      crossmul:\n        range_looks: 7\n        azimuth_looks: 16\n'
     )
     assert get_crossmul_looks(rc) == (16, 7)
-
-
-def test_reproject_subset():
-    # AOI straddling the UTM zone 11N central meridian (117W, easting 500000).
-    xmin, ymin, xmax, ymax = reproject_subset([-117.1, 46.0, -116.9, 46.2], 32611)
-    assert xmin < xmax and ymin < ymax
-    assert 490_000 < xmin < 500_000 < xmax < 510_000
-    assert 5_000_000 < ymin < ymax < 5_200_000
 
 
 def test_get_config_subset(monkeypatch, tmp_path):

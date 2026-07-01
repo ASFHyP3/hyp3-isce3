@@ -7,12 +7,12 @@ call isce3, though importing the module does (isce3/nisar are imported at top).
 """
 
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
 import numpy as np
 import pytest
+from pyproj import Transformer
 
 from hyp3_isce3 import crop_rslc as crop_mod
 from hyp3_isce3.crop_rslc import (
@@ -22,8 +22,10 @@ from hyp3_isce3.crop_rslc import (
     _copy_except,
     _padded_slice,
     crop_rslc,
-    crop_rslc_pair,
+    crop_rslc_from_handle,
+    geocode_subset_box,
     get_polarizations,
+    write_skeleton,
 )
 
 
@@ -303,58 +305,6 @@ class TestCropRslc:
         assert '132.000000 132.000000' in wkt  # (az 60, rg 72)
 
 
-class TestCropPair:
-    def test_pair_writes_two_files(self, rslc_h5, tmp_path, monkeypatch):
-        # The NISAR reader + geo2rdr window solve need isce3; stub the reader and
-        # both reader-using steps so the pair plumbing (per-file crop + naming) is testable.
-        monkeypatch.setattr(crop_mod, 'SLC', lambda **k: None)
-        monkeypatch.setattr(crop_mod, 'aoi_to_radar_window', lambda *a, **k: EXPECTED_WINDOW)
-        monkeypatch.setattr(crop_mod, 'get_polarizations', lambda *a, **k: POLARIZATIONS)
-        # A real pair is two distinct files (different acquisition dates);
-        # mimic that so the per-file output names don't collide.
-        sec = tmp_path / 'synthetic_rslc_sec.h5'
-        _make_rslc(sec)
-        # bbox_wgs84/dem_file are unused here (the window solve is stubbed above),
-        # but pass type-valid values so static analysis is happy.
-        ref_sub, sec_sub = crop_rslc_pair(
-            rslc_h5,
-            sec,
-            bbox_wgs84=[0.0, 0.0, 0.0, 0.0],
-            dem_file='',
-            out_dir=tmp_path / 'subs',
-            margin=MARGIN,
-            az_looks=16,
-            rg_looks=7,
-        )
-        for p in (ref_sub, sec_sub):
-            assert Path(p).exists()
-            with h5py.File(p, 'r') as f:
-                a0, a1 = EXPECTED_WINDOW['az']
-                assert f[f'{_SWATHS}/zeroDopplerTime'].shape == (a1 - a0,)
-        assert ref_sub != sec_sub
-
-    def test_window_failure_names_the_rslc(self, rslc_h5, tmp_path, monkeypatch):
-        # An off-swath AOI fails per-file; the error should say which RSLC (ref is first).
-        monkeypatch.setattr(crop_mod, 'SLC', lambda **k: None)
-        monkeypatch.setattr(crop_mod, 'get_polarizations', lambda *a, **k: POLARIZATIONS)
-
-        def fail(*a, **k):
-            raise ValueError('AOI does not overlap')
-
-        monkeypatch.setattr(crop_mod, 'aoi_to_radar_window', fail)
-        with pytest.raises(ValueError, match='reference RSLC'):
-            crop_rslc_pair(
-                rslc_h5,
-                rslc_h5,
-                bbox_wgs84=[0.0, 0.0, 0.0, 0.0],
-                dem_file='',
-                out_dir=tmp_path / 'subs',
-                margin=MARGIN,
-                az_looks=16,
-                rg_looks=7,
-            )
-
-
 class TestBand:
     def test_returns_lsar(self, tmp_path):
         path = tmp_path / 'b.h5'
@@ -438,3 +388,111 @@ def test_copy_except_skips_subtree(tmp_path):
         assert 'a/keep' in out  # sibling copied verbatim
         assert 'top' in out  # unrelated branch copied wholesale
         assert 'a/drop' not in out  # skipped subtree left for the caller to fill
+
+
+class TestCropFromHandle:
+    """crop_rslc_from_handle (the streaming entry point) must match crop_rslc exactly.
+
+    The streaming crop hands this an open remote handle instead of a path; here we
+    pass an open local handle and require byte-for-byte the same output as the
+    path-based crop, since only the source transport differs.
+    """
+
+    def test_matches_path_based_crop(self, rslc_h5, tmp_path):
+        via_path = tmp_path / 'via_path.h5'
+        via_handle = tmp_path / 'via_handle.h5'
+        crop_rslc(rslc_h5, via_path, EXPECTED_WINDOW, POLARIZATIONS)
+        with h5py.File(rslc_h5, 'r') as src:
+            crop_rslc_from_handle(src, via_handle, EXPECTED_WINDOW, POLARIZATIONS)
+
+        def datasets(h5):
+            out: dict = {}
+            h5.visititems(lambda n, o: out.__setitem__(n, o[()]) if isinstance(o, h5py.Dataset) else None)
+            return out
+
+        with h5py.File(via_path, 'r') as a, h5py.File(via_handle, 'r') as b:
+            da, db = datasets(a), datasets(b)
+        assert set(da) == set(db)
+        for name in da:
+            np.testing.assert_array_equal(da[name], db[name], err_msg=name)
+
+
+class TestWriteSkeleton:
+    """write_skeleton: full metadata copy, image datasets present but empty."""
+
+    def test_images_present_but_empty(self, rslc_h5, tmp_path):
+        skel = tmp_path / 'skeleton.h5'
+        with h5py.File(rslc_h5, 'r') as src:
+            write_skeleton(src, skel)
+        with h5py.File(rslc_h5, 'r') as src, h5py.File(skel, 'r') as out:
+            for fr in ('frequencyA', 'frequencyB'):
+                for pol in ('HH', 'HV'):
+                    s, o = src[f'{_SWATHS}/{fr}/{pol}'], out[f'{_SWATHS}/{fr}/{pol}']
+                    # Same shape/dtype/layout so the path-based readers see a real grid...
+                    assert o.shape == s.shape and o.dtype == s.dtype
+                    assert o.chunks == s.chunks and o.compression == s.compression
+                    # ...but no pixels were written (unallocated chunks read as the 0 fill value).
+                    assert not np.any(o[()])
+
+    def test_axes_and_metadata_copied_verbatim(self, rslc_h5, tmp_path):
+        skel = tmp_path / 'skeleton.h5'
+        with h5py.File(rslc_h5, 'r') as src:
+            write_skeleton(src, skel)
+        with h5py.File(rslc_h5, 'r') as src, h5py.File(skel, 'r') as out:
+            # Swath coordinate axes the window solve reads.
+            np.testing.assert_array_equal(out[f'{_SWATHS}/zeroDopplerTime'][()], SWATH_T)
+            np.testing.assert_array_equal(out[f'{_SWATHS}/frequencyA/slantRange'][()], SLANT_A)
+            # validSamples and non-image swath datasets preserved.
+            assert out[f'{_SWATHS}/frequencyA/validSamplesSubSwath1'].shape == (N_LINES, 2)
+            # Out-of-swath metadata and root attrs copied byte-for-byte.
+            assert out.attrs['mission_name'] == src.attrs['mission_name']
+            np.testing.assert_array_equal(
+                out['science/LSAR/RSLC/metadata/orbit/position'][()],
+                src['science/LSAR/RSLC/metadata/orbit/position'][()],
+            )
+            np.testing.assert_array_equal(out[f'{_GEOLOC}/coordinateX'][()], src[f'{_GEOLOC}/coordinateX'][()])
+
+    def test_skeleton_is_small(self, rslc_h5, tmp_path):
+        # The skeleton must not carry the image pixels (the whole point of streaming).
+        skel = tmp_path / 'skeleton.h5'
+        with h5py.File(rslc_h5, 'r') as src:
+            write_skeleton(src, skel)
+        assert skel.stat().st_size < rslc_h5.stat().st_size
+
+
+def _geocode_template(tmp_path, epsg=32637, ax=604080.0, ay=1588320.0, posting=80):
+    rc = tmp_path / 'rc.yaml'
+    rc.write_text(
+        'runconfig:\n  groups:\n    processing:\n      geocode:\n'
+        f'        output_epsg: {epsg}\n'
+        f'        top_left: {{x_abs: {ax}, y_abs: {ay}}}\n'
+        f'        output_posting: {{A: {{x_posting: {posting}, y_posting: {posting}}}}}\n'
+    )
+    return rc
+
+
+def test_geocode_subset_box(tmp_path):
+    rc = _geocode_template(tmp_path)  # EPSG 32637, anchor (604080, 1588320), 80 m posting
+    # Erta Ale AOI -> UTM zone 37N; its reprojected corners land off the 80 m lattice.
+    aoi = [40.55, 13.46, 40.78, 13.65]
+    xmin, ymin, xmax, ymax = geocode_subset_box(aoi, 32637, rc)
+    # Every corner is congruent to the anchor modulo the posting (same grid as a full-frame run).
+    assert (xmin - 604080.0) % 80 == 0
+    assert (xmax - 604080.0) % 80 == 0
+    assert (ymin - 1588320.0) % 80 == 0
+    assert (ymax - 1588320.0) % 80 == 0
+    # The snapped box is valid and only ever grows outward past the raw reprojected AOI.
+    transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True)
+    rxmin, rymin, rxmax, rymax = transformer.transform_bounds(aoi[0], aoi[1], aoi[2], aoi[3])
+    assert xmin <= rxmin and xmax >= rxmax
+    assert ymin <= rymin and ymax >= rymax
+
+
+def test_geocode_subset_box_epsg_mismatch(tmp_path):
+    rc = _geocode_template(tmp_path, epsg=32636)  # template projection != requested EPSG below
+    aoi = [40.55, 13.46, 40.78, 13.65]
+    # Mismatched projection: the anchor is in a different CRS, so the box is reprojected but
+    # left un-snapped (returned as the raw transform_bounds result in the requested EPSG).
+    box = geocode_subset_box(aoi, 32637, rc)
+    transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True)
+    assert box == transformer.transform_bounds(aoi[0], aoi[1], aoi[2], aoi[3])
