@@ -14,10 +14,9 @@ from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import ogr, osr
-from pyproj import Transformer
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import crop_rslc_pair
+from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
 
 
 asf.constants.INTERNAL.CMR_TIMEOUT = 90
@@ -249,18 +248,24 @@ def get_tec(scene_name: str) -> str:
     return str(files[-1])
 
 
-def get_watermask(reference_path: str) -> str:
+def get_watermask(reference_path: str, subset: list[float] | None = None) -> str:
     """Download files to apply ionospheric corrections.
 
     Args:
         reference_path: Path of the reference scene.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the mask
+            is fetched over the AOI instead of the whole frame (the 1-degree buffer
+            below covers the crop margin).
 
     Returns:
         tropo_path: Path of the file.
     """
     short_name = 'NISAR_WATERMASK'
-    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
-    bbox = poly.bounds
+    if subset is None:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+        bbox = poly.bounds
+    else:
+        bbox = subset
     bbox = (bbox[0] - 1, bbox[1] - 1, bbox[2] + 1, bbox[3] + 1)
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
@@ -307,36 +312,28 @@ def get_epsg(lat: float, lon: float) -> int:
     return epsg_base + zone_number
 
 
-def reproject_subset(subset: list[float], epsg_code: int) -> tuple[float, float, float, float]:
-    """Reproject a WGS84 lon/lat subset box to the output UTM projection.
-
-    Args:
-        subset: WGS84 bounding box as [lon_min, lat_min, lon_max, lat_max].
-        epsg_code: Output UTM EPSG code.
-
-    Returns:
-        bbox: Enclosing (xmin, ymin, xmax, ymax) box in UTM meters.
-    """
-    lon_min, lat_min, lon_max, lat_max = subset
-    # transform_bounds densifies the edges, so the returned box encloses the
-    # reprojected lon/lat rectangle even where its boundary bulges between corners.
-    transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_code}', always_xy=True)
-    return transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
-
-
-def get_scene_polygon(reference_path: str) -> ogr.Geometry:
+def get_scene_polygon(reference_path: str, subset: list[float] | None = None) -> ogr.Geometry:
     """Get Polygon for reference scene.
 
     Args:
         reference_path: Path of the downloaded h5 file.
-        epsg_code: EPSG code for the polygon coordinates.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM is
+            staged over the AOI (plus a buffer for the crop margin and radar-processing
+            edges) instead of the whole frame. EPSG is still taken from the full scene.
 
     Returns:
         geom: Polygon of the reference scene.
     """
     poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
     epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
-    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=str(epsg_code))
+    if subset is None:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=str(epsg_code))
+    else:
+        # Buffer the AOI past the 512-px crop margin's ground extent (~5-6 km); the
+        # extra apply_margin_to_geographic_box 5 km below then adds further headroom.
+        buf = 0.1  # degrees (~11 km)
+        bbox = [subset[0] - buf, subset[1] - buf, subset[2] + buf, subset[3] + buf]
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=bbox, bbox_epsg='4326')
     poly = stage_dem.apply_margin_to_geographic_box(poly)
     geom = ogr.CreateGeometryFromWkt(str(poly))
 
@@ -386,10 +383,18 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     product_id = get_product_id(reference_scene, secondary_scene)
 
     earthaccess.login()
-    reference_path = download_rslc(reference_scene)
-    secondary_path = download_rslc(secondary_scene)
+    if subset:
+        # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
+        # product in every pre-crop step, and the image window is streamed by crop_streamed.
+        reference_path = str(stream_skeleton(reference_scene))
+        secondary_path = str(stream_skeleton(secondary_scene))
+    else:
+        reference_path = download_rslc(reference_scene)
+        secondary_path = download_rslc(secondary_scene)
 
-    watermask = get_watermask(reference_path)
+    # When subsetting, stage the water mask and DEM over the AOI only (orbit/tropo/tec
+    # are temporal, so they are unaffected by the subset).
+    watermask = get_watermask(reference_path, subset)
 
     reference_orbit = get_orbit(reference_scene)
     secondary_orbit = get_orbit(secondary_scene)
@@ -399,7 +404,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
 
     tec_path = get_tec(reference_scene)
 
-    scene_polygon, epsg_code = get_scene_polygon(reference_path)
+    scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
     dem_path = get_dem(scene_polygon, epsg_code)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
@@ -410,17 +415,18 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
     subset_utm = None
     if subset:
-        subset_utm = reproject_subset(subset, epsg_code)
+        # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
+        # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
+        # decorrelated areas).
+        subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
         az_looks, rg_looks = get_crossmul_looks(template_yaml)
-        reference_path, secondary_path = crop_rslc_pair(
-            reference_path,
-            secondary_path,
-            subset,
-            dem_path,
-            out_dir='.',
-            margin=512,
-            az_looks=az_looks,
-            rg_looks=rg_looks,
+        # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
+        # independently from its own orbit; only overlapping image chunks are pulled.
+        reference_path = crop_streamed(
+            reference_scene, reference_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
+        )
+        secondary_path = crop_streamed(
+            secondary_scene, secondary_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
         )
 
     yaml_path = get_config(

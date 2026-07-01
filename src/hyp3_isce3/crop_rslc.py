@@ -44,13 +44,17 @@ extended to cover them.
 """
 
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import earthaccess
 import h5py
 import isce3
 import numpy as np
+import yaml
 from nisar.products.readers import SLC
+from pyproj import Transformer
 
 
 log = logging.getLogger(__name__)
@@ -79,6 +83,18 @@ def _padded_slice(axis: np.ndarray, lo: float, hi: float, margin: int) -> tuple[
     i0, i1 = np.searchsorted(axis, [lo, hi])
     # Pad each side and clamp to the axis bounds.
     return int(max(0, i0 - margin)), int(min(len(axis), i1 + margin))
+
+
+def _snap_to_grid(value: float, step: float, origin: float = 0, expand_up: bool = False) -> float:
+    """Snap ``value`` onto the lattice ``origin + k * step``.
+
+    Floors to the node at or below ``value`` (or ceils to the node at or above it when
+    ``expand_up``). Both crops snap to a grid so the cropped output's cells coincide with a
+    full-frame run's: the radar window to the multilook looks (``origin`` 0), the geocode box
+    to the posting (``origin`` the runconfig anchor). Integer ``value``/``step`` give an int.
+    """
+    round_to_node = math.ceil if expand_up else math.floor
+    return origin + round_to_node((value - origin) / step) * step
 
 
 def _solve_aoi_corners(
@@ -192,15 +208,65 @@ def aoi_to_radar_window(
     # Floor the window start to a multiple of the looks (multilook alignment; see module docstring).
     # rg_looks is the single crossmul range looks, applied to every frequency's own grid.
     a0, a1 = _padded_slice(swath_t, a_lo, a_hi, margin)
-    window = {'az': ((a0 // az_looks) * az_looks, a1)}
+    window = {'az': (int(_snap_to_grid(a0, az_looks)), a1)}
     for fr in freq_groups:
         p0, p1 = _padded_slice(slant_axes[fr], r_lo, r_hi, margin)
-        window[fr] = ((p0 // rg_looks) * rg_looks, p1)
+        window[fr] = (int(_snap_to_grid(p0, rg_looks)), p1)
 
     a0, a1 = window['az']
     p0, p1 = window['frequencyA']
     log.info('Radar window %s: az %d lines, frequencyA %d px', Path(slc.filename).name, a1 - a0, p1 - p0)
     return window
+
+
+def geocode_subset_box(
+    subset: list[float], epsg_code: int, template_yaml: str | Path
+) -> tuple[float, float, float, float]:
+    """Reproject the WGS84 AOI to the output UTM box and snap it onto the full-frame geocode grid.
+
+    Two steps that together produce the geocode output box. First reproject the lon/lat AOI
+    into ``epsg_code`` meters. Then expand the box outward onto the runconfig's geocode lattice:
+    isce3 posts every geocoded layer from the ``geocode.top_left`` anchor (each layer's first
+    pixel center lands at ``anchor + posting/2``), so a full-frame run falls on a fixed lattice.
+    A subset must share that lattice or its geocoded pixel centers sit a fraction of a pixel off
+    the full-frame's, which re-rolls the speckle realization in decorrelated areas (coherent
+    areas, being smooth, still match). Two runs coincide iff their input ``top_left`` are
+    congruent modulo the coarsest posting, so we snap the corners to ``anchor + k * posting`` --
+    finer layers, whose posting divides it, then align too. This is the geocode-grid analog of
+    the radar-window snap in :func:`aoi_to_radar_window`; sourcing anchor/posting from the
+    runconfig the workflow runs keeps them from drifting.
+
+    Args:
+        subset: AOI bounding box [lon_min, lat_min, lon_max, lat_max] in WGS84 degrees.
+        epsg_code: Output UTM EPSG code; must match the template's geocode projection.
+        template_yaml: Path of the downloaded JPL runconfig (from ``process.download_yaml``).
+
+    Returns:
+        subset_utm: (xmin, ymin, xmax, ymax) box in UTM meters, snapped to the geocode grid.
+    """
+    # Reproject the lon/lat rectangle to UTM; transform_bounds densifies the edges so the
+    # returned box encloses it even where the boundary bulges between corners.
+    lon_min, lat_min, lon_max, lat_max = subset
+    transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{epsg_code}', always_xy=True)
+    xmin, ymin, xmax, ymax = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
+
+    geocode = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['geocode']
+    if int(geocode['output_epsg']) != epsg_code:
+        log.warning(
+            'Subset EPSG %d != template geocode EPSG %s; skipping grid snap.', epsg_code, geocode['output_epsg']
+        )
+        return xmin, ymin, xmax, ymax
+
+    ax, ay = float(geocode['top_left']['x_abs']), float(geocode['top_left']['y_abs'])
+    px = float(geocode['output_posting']['A']['x_posting'])  # coarsest posting; finer layers divide it
+    py = float(geocode['output_posting']['A']['y_posting'])
+
+    # Snap each corner to anchor + integer*posting, expanding outward to keep full AOI coverage.
+    xmin = _snap_to_grid(xmin, px, ax)
+    xmax = _snap_to_grid(xmax, px, ax, expand_up=True)
+    ymin = _snap_to_grid(ymin, py, ay)
+    ymax = _snap_to_grid(ymax, py, ay, expand_up=True)
+    return xmin, ymin, xmax, ymax
 
 
 def get_polarizations(slc: SLC) -> dict[str, list[str]]:
@@ -365,11 +431,36 @@ def crop_rslc(
     Returns:
         dst_h5: Path of the written cropped RSLC.
     """
-    src_h5, dst_h5 = Path(src_h5), Path(dst_h5)
+    with h5py.File(Path(src_h5), 'r') as src:
+        return crop_rslc_from_handle(src, dst_h5, window, polarizations)
+
+
+def crop_rslc_from_handle(
+    src: h5py.File,
+    dst_h5: str | Path,
+    window: dict[str, tuple[int, int]],
+    polarizations: dict[str, list[str]],
+) -> Path:
+    """Write a cropped RSLC from an already-open source handle.
+
+    Same crop as :func:`crop_rslc`, but from an open ``h5py.File`` rather than a path,
+    so a remote handle's windowed slices become byte-range reads (see :func:`crop_streamed`)
+    and the output is byte-for-byte identical to a local crop.
+
+    Args:
+        src: Open source RSLC, a local or remote ``h5py.File`` handle.
+        dst_h5: Path of the cropped RSLC h5 file to write.
+        window: Index slices from :func:`aoi_to_radar_window`.
+        polarizations: Frequency group name -> polarization list from :func:`get_polarizations`.
+
+    Returns:
+        dst_h5: Path of the written cropped RSLC.
+    """
+    dst_h5 = Path(dst_h5)
     a0, a1 = window['az']
     p0a, p1a = window['frequencyA']
 
-    with h5py.File(src_h5, 'r') as src, h5py.File(dst_h5, 'w') as dst:
+    with h5py.File(dst_h5, 'w') as dst:
         root = f'science/{_band(src)}'
         swaths = f'{root}/RSLC/swaths'
         geoloc = f'{root}/RSLC/metadata/geolocationGrid'
@@ -399,48 +490,104 @@ def crop_rslc(
     return dst_h5
 
 
-def crop_rslc_pair(
-    reference_rslc: str | Path,
-    secondary_rslc: str | Path,
-    bbox_wgs84: list[float],
-    dem_file: str | Path,
-    out_dir: str | Path,
-    margin: int,
-    az_looks: int,
-    rg_looks: int,
-) -> tuple[str, str]:
-    """Crop a reference/secondary RSLC pair to the AOI radar window.
+def write_skeleton(src: h5py.File, skeleton_h5: str | Path) -> Path:
+    """Write a metadata-only copy of an RSLC: full structure, empty image datasets.
 
-    Each file's window is solved independently from its own orbit (the AOI maps to
-    different lines/pixels in each acquisition); ``margin`` guards processing edge
-    effects (filter kernels, coregistration search). ``az_looks``/``rg_looks`` must
-    match the InSAR multilook looks so each crop's multilook cells align with a
-    full-frame run.
+    The window solve and its isce3 readers open the product by path and read only
+    metadata and the swath axes, never the pixels. Recreating the large pol images
+    empty (same shape/dtype/layout) yields a tiny local file those path-based readers
+    accept, so :func:`crop_streamed` can solve the window without downloading imagery.
 
     Args:
-        reference_rslc: Path of the reference RSLC h5 file.
-        secondary_rslc: Path of the secondary RSLC h5 file.
-        bbox_wgs84: AOI bounding box [lon_min, lat_min, lon_max, lat_max] in WGS84 degrees.
-        dem_file: Path of a DEM GeoTIFF in WGS84 used for corner heights.
-        out_dir: Directory to write the cropped RSLCs into.
-        margin: Padding in frequencyA samples / azimuth lines added on every side.
-        az_looks: Azimuth multilook looks (the InSAR crossmul value); window starts are floored to it.
-        rg_looks: Range multilook looks (the InSAR crossmul value); window starts are floored to it.
+        src: Open source RSLC (typically a remote h5py handle).
+        skeleton_h5: Path of the skeleton h5 file to write.
 
     Returns:
-        paths: (ref_sub_path, sec_sub_path) of the cropped RSLCs.
+        skeleton_h5: Path of the written skeleton.
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    skeleton_h5 = Path(skeleton_h5)
+    with h5py.File(skeleton_h5, 'w') as dst:
+        swaths = f'science/{_band(src)}/RSLC/swaths'
+        _copy_except(src, dst, {swaths})  # everything outside swaths is small metadata
 
-    def crop_one(src: str | Path, ref_or_sec: str) -> str:
-        slc = SLC(hdf5file=str(src))  # one reader per file, shared by both steps
-        try:
-            window = aoi_to_radar_window(slc, bbox_wgs84, dem_file, margin, az_looks, rg_looks)
-        except (ValueError, RuntimeError) as e:
-            raise ValueError(f'AOI does not fit the {ref_or_sec} RSLC {Path(src).name}: {e}') from e
-        dst = out_dir / f'{Path(src).stem}_sub.h5'
-        crop_rslc(src, dst, window, get_polarizations(slc))
-        return str(dst)
+        # Rebuild swaths: copy the axes/validSamples, but recreate the pol images empty.
+        src_sw = src[swaths]
+        dst_sw = dst.create_group(swaths)
+        _copy_attrs(src_sw, dst_sw)
+        for name, item in src_sw.items():
+            if not name.startswith('frequency'):
+                src_sw.copy(name, dst_sw, name=name)  # zeroDopplerTime axis, spacing, ...
+                continue
+            dst_fr = dst_sw.create_group(name)
+            _copy_attrs(item, dst_fr)
+            for sub, ds in item.items():
+                # Recreate the large 2D complex pol images empty (shape only, no pixels).
+                if isinstance(ds, h5py.Dataset) and ds.ndim == 2 and ds.dtype.kind == 'c':
+                    d = dst_fr.create_dataset(
+                        sub, shape=ds.shape, dtype=ds.dtype, chunks=ds.chunks, compression=ds.compression
+                    )
+                    _copy_attrs(ds, d)
+                else:
+                    item.copy(sub, dst_fr, name=sub)  # slantRange, validSamples, ...
+    log.info('Wrote RSLC skeleton: %s', skeleton_h5)
+    return skeleton_h5
 
-    return crop_one(reference_rslc, 'reference'), crop_one(secondary_rslc, 'secondary')
+
+# --- streaming crop ---------------------------------------------------------
+# Read an RSLC's AOI window over byte-range instead of downloading the whole product.
+# RSLC imagery is chunked, compressed HDF5, so a windowed read pulls only the
+# overlapping chunks. Per scene: stream a metadata-only skeleton (the path-based isce3
+# readers need metadata, not pixels, to solve the window), then crop the window straight
+# from the remote handle. Output is byte-for-byte identical to a local crop.
+
+# CMR collection of the NISAR L1 RSLC granules (BETA, matching the rest of the pipeline).
+RSLC_SHORT_NAME = 'NISAR_L1_RSLC_BETA_V1'
+
+
+def open_remote_rslc(scene_name: str) -> h5py.File:
+    """Open a NISAR RSLC over byte-range as an h5py handle (no full download)."""
+    results = earthaccess.search_data(short_name=RSLC_SHORT_NAME, readable_granule_name=scene_name)
+    if len(results) == 0:
+        raise ValueError(f'No {RSLC_SHORT_NAME} granule found for {scene_name}')
+    # earthaccess.open() handles auth + the S3/HTTPS redirect and block-caches reads.
+    fileobj = earthaccess.open(results[:1])[0]
+    return h5py.File(fileobj, 'r', driver='fileobj')
+
+
+def stream_skeleton(scene_name: str) -> Path:
+    """Stream a metadata-only skeleton of a remote RSLC to ``<scene>_skeleton.h5``.
+
+    Stands in for the full product in the pre-crop steps; the name keeps the
+    pipeline's name-parsing steps working.
+    """
+    with open_remote_rslc(scene_name) as remote:
+        return write_skeleton(remote, f'{scene_name}_skeleton.h5')
+
+
+def crop_streamed(
+    scene_name: str,
+    skeleton_path: str | Path,
+    bbox_wgs84: list[float],
+    dem_file: str | Path,
+    margin: int = 512,
+    az_looks: int = 16,
+    rg_looks: int = 7,
+) -> str:
+    """Solve the radar window from the skeleton, then stream-crop the window to ``<scene>_sub.h5``.
+
+    Reopens the remote product (cheap; avoids holding a handle across the intervening
+    ancillary downloads) and reads only the windowed image chunks. ``bbox_wgs84`` is
+    [lon_min, lat_min, lon_max, lat_max]; ``margin``/``az_looks``/``rg_looks`` pass through
+    to :func:`aoi_to_radar_window`.
+    """
+    # Window + polarizations come from the local skeleton via the existing readers.
+    slc = SLC(hdf5file=str(skeleton_path))
+    try:
+        window = aoi_to_radar_window(slc, bbox_wgs84, dem_file, margin, az_looks, rg_looks)
+    except (ValueError, RuntimeError) as e:
+        raise ValueError(f'AOI does not fit the RSLC {scene_name}: {e}') from e
+
+    out_path = f'{scene_name}_sub.h5'
+    with open_remote_rslc(scene_name) as remote:
+        crop_rslc_from_handle(remote, out_path, window, get_polarizations(slc))
+    return out_path
