@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python>=3.12,<3.13
+  - python>=3.8
   - pip
   # For packaging, and testing
   - setuptools_scm
@@ -13,17 +13,35 @@ dependencies:
   - pytest-mock
   # For running
   - asf_search
+  - backoff
+  - cmake>=3.18
+  - cxx-compiler
   - earthaccess
-  - gdal
-  - isce3
+  - eigen>=3.3
+  - fftw>=3.3
+  - gdal>=3.6
+  - gmock>=1.10
   - hyp3lib>=3,<4
+  - gtest>=1.10
+  - h5py>=3
+  - hdf5>=1.10.2,!=1.14.0
   - libgdal-hdf5
+  - libgdal-netcdf
+  - ninja
+  - numpy>=1.20
   - pandas<3
-  - pyaps3
+  - pyaps3>=0.3
+  - pybind11>=2.5
+  - pyre>=1.12.5
+  - pysolid>=0.2
   - pygrib
   - pyproj
-  - raider>=0.4.5,<0.5.4
-  - snaphu
+  - raider>=0.4.5
+  - ruamel.yaml
+  - scipy!=1.10.0
+  - shapely>=2
+  - snaphu>=0.4
+  - yamale
   - utm
   # TODO: insert conda-forge dependencies as list here
   - pip:
