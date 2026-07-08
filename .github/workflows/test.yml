@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pixi_environment: ["py310", "py311", "py312"]
+        pixi_environment: ["py312", "py313", "py314"]
     steps:
       - uses: actions/checkout@v7
 
