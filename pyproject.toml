@@ -19,9 +19,10 @@ classifiers=[
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "hyp3lib>=3,<5",
+    "boto3",
     # TODO: insert Python dependencies as list here
 ]
 dynamic = ["version"]
@@ -97,3 +98,123 @@ install_types = true
 non_interactive = true
 pretty = true
 disable_error_code = ["import-untyped"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
+
+[tool.pixi.pypi-options]
+no-build-isolation = ['isce3']
+
+[tool.pixi.dependencies]
+pip = "*"
+asf_search = "*"
+boto3 = "*"
+botocore = "*"
+burst2safe = ">=1.4.4"
+earthaccess = "*"
+ecmwf-api-client="*"
+gdal = ">=3"
+geopandas="*"
+h5netcdf = "*"
+herbie-data="<2025.2.1"
+hyp3lib = ">=4,<5"
+libgdal-netcdf = "*"
+libgdal-jp2openjpeg = "*"
+matplotlib-base = "*"
+netcdf4 = "*"
+numpy = "<2.4"
+opencv = "*"
+pandas = ">=1.4,<3.0"
+pyaps3="*"
+pydap="*"
+pygrib="*"
+pyproj = ">=3.3"
+python-dateutil = "*"
+rasterio="*"
+requests = ">=2.0"
+scipy = ">=1.0"
+utm = "*"
+xarray = "*"
+# For building radar deps
+cxx-compiler = "*"
+gfortran = "*"
+eigen = ">=3.3.7,<4"
+numba = "*"
+scikit-image = "*"
+pkgconfig = "*"
+gtest = "*"
+fftw = "*"
+pybind11 = "*"
+rioxarray="*"
+ruamel = "*"
+"ruamel.yaml" = "*"
+yamale = "*"
+backoff = "*"
+pysolid = "*"
+# For PyCharm IDE integration
+pixi-pycharm = ">=0.0.8,<0.0.9"
+
+
+[tool.pixi.target.linux-64.dependencies]
+pyre = "*"
+
+[tool.pixi.target.linux-aarch64.pypi-dependencies]
+pyre = "*"
+
+[tool.pixi.target.osx-64.dependencies]
+pyre = "*"
+
+[tool.pixi.target.osx-arm64.dependencies]
+pyre = "*"
+
+[tool.pixi.pypi-dependencies]
+snaphu = "*"
+raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3"}
+
+[tool.pixi.feature.pycharm.dependencies]
+pixi-pycharm = "*"
+
+[tool.pixi.feature.py312.dependencies]
+python = "3.12.*"
+
+[tool.pixi.feature.py313.dependencies]
+python = "3.13.*"
+
+[tool.pixi.feature.py314.dependencies]
+python = "3.14.*"
+
+[tool.pixi.environments]
+default = { features = ["develop", "pycharm"], solve-group = "default" }
+py312 = { features = ["develop", "py312"]}
+py313 = { features = ["develop", "py313"]}
+py314 = { features = ["develop", "py314"], solve-group = "default"}
+
+
+[tool.pixi.tasks.install-isce3]
+cmd = [
+    "python",
+    "-m",
+    "pip",
+    "install",
+    "git+https://github.com/isce-framework/isce3.git@bd58fcd3dad94f7f06871f927b902eca20680439"
+]
+depends-on = []
+
+[tool.pixi.tasks.install-editable]
+cmd = [
+    "python",
+    "-m",
+    "pip",
+    "install",
+    "-e",
+    ".",
+]
+depends-on = ["install-isce3"]
+
+[tool.pixi.tasks.tests]
+cmd = [
+    "pytest",
+    "--cov=hyp3_isce3",
+]
+depends-on = ["install-editable"]
