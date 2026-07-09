@@ -69,19 +69,26 @@ Tip: you can use [`docker run --env-file`](https://docs.docker.com/reference/cli
 
 ## Developer Setup
 
-1. Ensure that conda is installed on your system (we recommend using [mambaforge](https://github.com/conda-forge/miniforge#mambaforge) to reduce setup times).
-2. Download a local version of the `hyp3-isce3` repository (`git clone https://github.com/ASFHyP3/hyp3-isce3.git`)
-3. In the base directory for this project call `mamba env create -f environment.yml` to create your Python environment, then activate it (`mamba activate hyp3-isce3`)
-4. Finally, install a development version of the package (`python -m pip install -e .`)
+1. Ensure that pixi is installed on your system: <https://pixi.sh/latest/installation/>.
+2. Clone the `hyp3-isce3` repository and navigate to the root directory of this project
+   ```bash
+   git clone https://github.com/ASFHyP3/hyp3-isce3.git
+   cd hyp3-isce3
+   ```
+3. setup the development environment
+   ```bash
+    pixi run install-editable
+   ```
+4. (optional) [traditional conda-like activation](https://pixi.sh/latest/workspace/environment/#traditional-conda-activate-like-activation) of the pixi environment
+   ```bash
+   eval "$(pixi shell-hook)"
+   ```
 
-To run all commands in sequence use:
-```bash
-git clone https://github.com/ASFHyP3/hyp3-isce3.git
-cd hyp3-isce3
-mamba env create -f environment.yml
-mamba activate hyp3-isce3
-python -m pip install -e .
-```
+    > [!TIP]
+    > If you've done (4), you don't need to prefix commands with `pixi run`.
+5. (optional) Setup you IDE to work with pixi:
+   * PyCharm: https://pixi.sh/dev/integration/editor/jetbrains/
+   * VSCode: https://pixi.sh/dev/integration/editor/vscode/
 
 ## Background
 
