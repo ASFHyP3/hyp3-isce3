@@ -26,13 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git g++ unzip v
 USER 1000
 SHELL ["/bin/bash", "-l", "-c"]
 
-#USER root
-
 WORKDIR /hyp3-isce3/
 
-#RUN chown -R 1000:1000 .
 
-#USER 1000
 COPY --chown=1000:1000 pyproject.toml pixi.lock ./
 
 
