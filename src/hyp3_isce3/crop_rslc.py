@@ -316,7 +316,7 @@ def _update_identification_times(
         path = f'{identification_path}/{field}'
         if path not in dst:
             continue
-        value = (epoch + timedelta(seconds=float(seconds))).isoformat()
+        value = (epoch + timedelta(seconds=float(seconds))).isoformat(timespec='microseconds')
         sample = dst[path][()]
         dst[path][...] = value.encode() if isinstance(sample, bytes) else value
 
