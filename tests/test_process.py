@@ -1,6 +1,52 @@
 from pathlib import Path
 
-from hyp3_isce3.process import get_config, get_crossmul_looks
+import pytest
+import yaml
+
+from hyp3_isce3.process import apply_overrides, get_config, get_crossmul_looks
+
+
+def _runconfig(tmp_path: Path) -> Path:
+    rc = tmp_path / 'rc.yaml'
+    rc.write_text(
+        'runconfig:\n'
+        '  groups:\n'
+        '    processing:\n'
+        '      crossmul:\n'
+        '        range_looks: 7\n'
+        '        azimuth_looks: 16\n'
+        '      dense_offsets:\n'
+        '        enabled: true\n'
+    )
+    return rc
+
+
+def test_apply_overrides_nested_and_dotted(tmp_path):
+    rc = _runconfig(tmp_path)
+    # A dotted key and a nested dict both under `processing` -- both must survive the merge.
+    apply_overrides(
+        rc,
+        {
+            'processing.crossmul.range_looks': 11,
+            'processing': {'dense_offsets': {'enabled': False}},
+        },
+    )
+    proc = yaml.safe_load(rc.read_text())['runconfig']['groups']['processing']
+    assert proc['crossmul']['range_looks'] == 11
+    assert proc['crossmul']['azimuth_looks'] == 16  # untouched key preserved
+    assert proc['dense_offsets']['enabled'] is False
+
+
+def test_apply_overrides_unknown_key_raises(tmp_path):
+    rc = _runconfig(tmp_path)
+    with pytest.raises(KeyError, match='does not exist'):
+        apply_overrides(rc, {'processing.crossmul.rnge_looks': 9})
+
+
+def test_apply_overrides_leaf_as_section_raises(tmp_path):
+    rc = _runconfig(tmp_path)
+    with pytest.raises(KeyError, match='leaf'):
+        apply_overrides(rc, {'processing.crossmul.range_looks': {'nope': 1}})
 
 
 def test_get_config(monkeypatch, tmp_path):

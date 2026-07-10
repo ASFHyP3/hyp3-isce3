@@ -134,6 +134,71 @@ def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
     return int(crossmul['azimuth_looks']), int(crossmul['range_looks'])
 
 
+def _deep_update(dst: dict, src: dict) -> dict:
+    """Recursively merge ``src`` into ``dst`` in place (dict values merged, not replaced)."""
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            _deep_update(dst[key], value)
+        else:
+            dst[key] = value
+    return dst
+
+
+def _expand_dotted(overrides: dict) -> dict:
+    """Expand dotted keys ({'a.b': v}) into nested dicts ({'a': {'b': v}}), recursively.
+
+    Branches that collide (a dotted and a nested key sharing a prefix) are merged, not
+    overwritten, so ``{'processing.crossmul.x': 1, 'processing': {'y': 2}}`` keeps both.
+    """
+    expanded: dict = {}
+    for key, value in overrides.items():
+        if isinstance(value, dict):
+            value = _expand_dotted(value)
+        nested = value
+        for part in reversed(key.split('.')):
+            nested = {part: nested}
+        _deep_update(expanded, nested)
+    return expanded
+
+
+def _merge_existing(config: dict, overrides: dict, prefix: str = '') -> None:
+    """Deep-merge ``overrides`` into ``config`` in place; every key must already exist.
+
+    A path that does not resolve to an existing key raises KeyError -- that validates the
+    request and blocks injecting keys the workflow would silently ignore.
+    """
+    for key, value in overrides.items():
+        path = f'{prefix}{key}'
+        if key not in config:
+            raise KeyError(f'override key does not exist in the runconfig: {path}')
+        if isinstance(value, dict) and isinstance(config[key], dict):
+            _merge_existing(config[key], value, prefix=f'{path}.')
+        elif isinstance(value, dict):
+            raise KeyError(f'override targets a leaf, not a section: {path}')
+        else:
+            config[key] = value
+
+
+def apply_overrides(template_yaml: Path, overrides: dict) -> None:
+    """Deep-merge ``overrides`` into the runconfig at ``template_yaml``, in place.
+
+    Overrides are relative to ``runconfig.groups`` (e.g. ``processing.crossmul.range_looks``)
+    and may be written nested or with dotted keys. Only keys that already exist in the
+    downloaded runconfig may be set; an unknown path raises so typos and junk keys fail fast.
+
+    Args:
+        template_yaml: Path of the downloaded runconfig to modify.
+        overrides: Mapping of runconfig keys (under ``groups``) to new values.
+    """
+    config = yaml.safe_load(Path(template_yaml).read_text())
+    _merge_existing(config['runconfig']['groups'], _expand_dotted(overrides))
+    # Dump with 4-space indent to match the JPL runconfig / schema header indentation, so
+    # get_config's line-based splice keeps groups children (product_path_group, processing, ...)
+    # nested under `groups`. yaml's default 2-space indent would drop them a level and break the
+    # spliced runconfig's structure (isce3 schema validation then fails).
+    Path(template_yaml).write_text(yaml.safe_dump(config, sort_keys=False, indent=4))
+
+
 def download_yaml(reference_path: str) -> Path:
     """Download reference configuration file for GUNW.
 
@@ -146,6 +211,14 @@ def download_yaml(reference_path: str) -> Path:
     short_name = 'NISAR_L2_GUNW_BETA_V1'
     keyword = '_'.join(reference_path.split('_')[4:8])
     results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
+    if len(results) == 0:
+        # The reference scene's own cycle may never have been a GUNW reference (e.g. a custom
+        # pair the operational catalog didn't process). The runconfig template is generic to the
+        # track/frame, so fall back to any GUNW over the same track/dir/frame.
+        frame_key = '_'.join(reference_path.split('_')[5:8])
+        results = earthaccess.search_data(short_name=short_name, granule_name=f'*_{frame_key}_*')
+    if len(results) == 0:
+        raise ValueError(f'No {short_name} runconfig template found for {reference_path}')
     gunw = results[0].data_links()[0].split('/')[-2]
     res = asf.granule_search(gunw)
     yaml_url = res.find_urls(pattern=r'.yaml')[0]
@@ -369,13 +442,19 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     return product_id
 
 
-def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float] | None = None) -> Path:
+def process_isce3(
+    reference_scene: str,
+    secondary_scene: str,
+    subset: list[float] | None = None,
+    overrides: dict | None = None,
+) -> Path:
     """Get Polygon for reference scene.
 
     Args:
         reference_scene: Name of the reference scene.
         secondary_scene: Name of the secondary scene.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
+        overrides: Optional runconfig overrides (under ``groups``); only existing keys may be set.
 
     Returns:
         h5file: Path of the GUNW h5file.
@@ -399,8 +478,16 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     reference_orbit = get_orbit(reference_scene)
     secondary_orbit = get_orbit(secondary_scene)
 
-    reference_tropo = get_tropo(reference_scene)
-    secondary_tropo = get_tropo(secondary_scene)
+    # Demo config: tropo + iono corrections are disabled so runs stay fast and focus on the
+    # interferogram/parameter behavior. Skipping tropo also avoids the ~2 GB-each ECMWF
+    # downloads -- get_config still needs a path for the tropo fields, so reuse the
+    # already-fetched watermask (an existing file that validates); troposphere_delay.enabled is
+    # forced off below so it is never read. TEC is always fetched: it is tiny (~20 MB) and isce3
+    # validates it as JSON at config load even when the ionosphere step is disabled.
+    run_ionosphere = False
+    run_troposphere = False
+    reference_tropo = get_tropo(reference_scene) if run_troposphere else watermask
+    secondary_tropo = get_tropo(secondary_scene) if run_troposphere else watermask
 
     tec_path = get_tec(reference_scene)
 
@@ -410,6 +497,18 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     # The JPL runconfig is both our config template (its tail) and the source of the
     # crossmul looks the crop aligns to; download once and reuse for both.
     template_yaml = download_yaml(reference_path)
+
+    # Apply user runconfig overrides before anything reads the template, so the crossmul
+    # looks and geocode grid the crop snaps to track any overridden values too.
+    # Force the tropo/iono correction flags off when their steps are skipped, so isce3 does not
+    # validate/read the placeholder (watermask) tropo/tec paths substituted above.
+    overrides = dict(overrides or {})
+    if not run_ionosphere:
+        overrides.setdefault('processing.ionosphere_phase_correction.enabled', False)
+    if not run_troposphere:
+        overrides.setdefault('processing.troposphere_delay.enabled', False)
+    if overrides:
+        apply_overrides(template_yaml, overrides)
 
     # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
     # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
@@ -460,11 +559,11 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
         'crossmul': True,
         'filter_interferogram': True,
         'unwrap': True,
-        'ionosphere': True,
+        'ionosphere': run_ionosphere,  # demo: off
         'geocode': True,
         'solid_earth_tides': True,
         'baseline': True,
-        'troposphere': True,
+        'troposphere': run_troposphere,  # demo: off; gates the tropo download above too
     }
 
     _, out_paths = h5_prep.get_products_and_paths(insar_runcfg.cfg)

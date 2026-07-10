@@ -1,5 +1,6 @@
 """isce3 processing for HyP3."""
 
+import json
 import logging
 import os
 import warnings
@@ -24,6 +25,24 @@ def nullable_subset_list(subset_string: str) -> list[str]:
     subset_string = subset_string.replace('None', '').strip()
     subset_list = [coord for coord in subset_string.split(' ') if coord]
     return subset_list
+
+
+def nullable_json_dict(override_string: str) -> dict | None:
+    """Parse the --override JSON string into a dict, treating empty/'None' as no overrides.
+
+    HyP3 stringifies a null parameter to the literal 'None' before it reaches the command,
+    so an unset override arrives as 'None' rather than being omitted.
+
+    Args:
+        override_string: JSON object of runconfig overrides, or '' / 'None' for no overrides.
+
+    Returns:
+        overrides: Parsed override dict, or None when no overrides were given.
+    """
+    override_string = override_string.strip()
+    if override_string in ('', 'None'):
+        return None
+    return json.loads(override_string)
 
 
 def earlier_granule_first(g1: str, g2: str) -> tuple[str, str]:
@@ -61,6 +80,13 @@ def main() -> None:
         nargs='*',
         help='Optional WGS84 bounding box to subset the output GUNW (LON_MIN LAT_MIN LON_MAX LAT_MAX)',
     )
+    parser.add_argument(
+        '--override',
+        type=nullable_json_dict,
+        default=None,
+        help='Optional JSON of runconfig overrides under `groups`, e.g. '
+        '\'{"processing.crossmul.range_looks": 11}\'. Only existing keys may be set.',
+    )
 
     args = parser.parse_args()
 
@@ -97,6 +123,7 @@ def main() -> None:
         reference_scene=reference_granule,
         secondary_scene=secondary_granule,
         subset=args.subset,
+        overrides=args.override,
     )
 
     if args.bucket:
