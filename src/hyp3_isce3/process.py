@@ -566,6 +566,15 @@ def process_isce3(
     if overrides:
         apply_overrides(template_yaml, overrides)
 
+    # The optional coregistration-refinement steps run only when their runconfig enabled flag is
+    # set, so a user can drop the (expensive) dense-offset/rubbersheet chain via --override and it
+    # is actually skipped -- not just disabled in config while the step still executes.
+    _proc = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
+    run_dense_offsets = bool(_proc['dense_offsets']['enabled'])
+    run_offsets_product = bool(_proc['offsets_product']['enabled'])
+    run_rubbersheet = bool(_proc['rubbersheet']['enabled'])
+    run_fine_resample = bool(_proc['fine_resample']['enabled'])
+
     # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
     # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
     subset_utm = None
@@ -614,10 +623,10 @@ def process_isce3(
         'geo2rdr': True,
         'prepare_insar_hdf5': True,
         'coarse_resample': True,
-        'dense_offsets': True,
-        'offsets_product': True,
-        'rubbersheet': True,
-        'fine_resample': True,
+        'dense_offsets': run_dense_offsets,  # follows runconfig enabled flag (overridable)
+        'offsets_product': run_offsets_product,
+        'rubbersheet': run_rubbersheet,
+        'fine_resample': run_fine_resample,
         'crossmul': True,
         'filter_interferogram': True,
         'unwrap': True,
