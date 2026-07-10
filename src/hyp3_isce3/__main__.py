@@ -90,8 +90,8 @@ def main() -> None:
     parser.add_argument(
         '--cache-dir',
         default=None,
-        help='Optional directory of pre-fetched inputs (cropped RSLCs, orbits, TEC, DEM). '
-        'Populated on the first run and reused on later runs for fast demo reruns.',
+        help='Optional directory of pre-fetched inputs (cropped RSLCs, orbits, TEC, water mask, '
+        'DEM). Populated on the first run and reused on later runs for fast demo reruns.',
     )
 
     args = parser.parse_args()

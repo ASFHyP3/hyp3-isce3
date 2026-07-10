@@ -15,7 +15,7 @@ import yaml
 from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
-from osgeo import ogr, osr
+from osgeo import gdal, ogr, osr
 
 import hyp3_isce3
 from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
@@ -345,7 +345,16 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
 
-    return str(files[-1])
+    # The download is a VRT mosaic that references sibling tile .tifs by path. Materialize it into
+    # a single self-contained GeoTIFF clipped to the AOI (the same way get_dem does for the DEM),
+    # so it has no external references and can be relocated/cached like every other ancillary.
+    mask_path = 'watermask.tif'
+    warped = gdal.Warp(mask_path, str(files[-1]), outputBounds=bbox, dstSRS='EPSG:4326')
+    if warped is None:
+        raise RuntimeError('Failed to warp the NISAR water mask into a standalone GeoTIFF')
+    warped = None  # flush to disk
+
+    return mask_path
 
 
 def get_dem(scene_poly: ogr.Geometry, epsg_code: int, dem_path: str = 'dem.tif') -> str:
@@ -487,12 +496,11 @@ def process_isce3(
         secondary_scene: Name of the secondary scene.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
         overrides: Optional runconfig overrides (under ``groups``); only existing keys may be set.
-        cache_dir: Optional directory of pre-fetched inputs. When set, the downloaded/cropped
-            inputs (skeletons, cropped RSLCs, orbits, TEC, DEM) are stashed here on the first run
-            and reused on later runs -- so a demo populated once reruns without re-downloading or
-            re-cropping. The cropped RSLCs are stored as ``<scene>_sub.h5``, matching the demo
-            subset script, so pre-cropped RSLCs are picked up directly. The water mask is refetched
-            every run (it is a VRT mosaic that cannot be safely relocated into the cache).
+        cache_dir: Optional directory of pre-fetched inputs. When set, every downloaded/cropped
+            input (skeletons, cropped RSLCs, orbits, TEC, water mask, DEM) is stashed here on the
+            first run and reused on later runs -- so a demo populated once reruns without
+            re-downloading or re-cropping. The cropped RSLCs are stored as ``<scene>_sub.h5``,
+            matching the demo subset script, so pre-cropped RSLCs are picked up directly.
 
     Returns:
         h5file: Path of the GUNW h5file.
@@ -510,11 +518,9 @@ def process_isce3(
         secondary_path = _staged(cache_dir, f'{secondary_scene}.h5', lambda: download_rslc(secondary_scene))
 
     # When subsetting, stage the water mask and DEM over the AOI only (orbit/tropo/tec
-    # are temporal, so they are unaffected by the subset).
-    # The water mask is NOT cached: get_watermask returns a VRT mosaic that references sibling
-    # tile .tifs by path, so relocating just the VRT into cache_dir breaks those references.
-    # It is a cheap refetch (a handful of small tiles), so refetch it every run.
-    watermask = get_watermask(reference_path, subset)
+    # are temporal, so they are unaffected by the subset). get_watermask materializes a
+    # standalone GeoTIFF, so it caches like the DEM.
+    watermask = _staged(cache_dir, 'watermask.tif', lambda: get_watermask(reference_path, subset))
 
     reference_orbit = _staged(cache_dir, f'{reference_scene}_orbit.xml', lambda: get_orbit(reference_scene))
     secondary_orbit = _staged(cache_dir, f'{secondary_scene}_orbit.xml', lambda: get_orbit(secondary_scene))
