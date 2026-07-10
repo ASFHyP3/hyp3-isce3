@@ -87,6 +87,12 @@ def main() -> None:
         help='Optional JSON of runconfig overrides under `groups`, e.g. '
         '\'{"processing.crossmul.range_looks": 11}\'. Only existing keys may be set.',
     )
+    parser.add_argument(
+        '--cache-dir',
+        default=None,
+        help='Optional directory of pre-fetched inputs (cropped RSLCs, orbits, TEC, water mask, '
+        'DEM). Populated on the first run and reused on later runs for fast demo reruns.',
+    )
 
     args = parser.parse_args()
 
@@ -124,6 +130,7 @@ def main() -> None:
         secondary_scene=secondary_granule,
         subset=args.subset,
         overrides=args.override,
+        cache_dir=args.cache_dir,
     )
 
     if args.bucket:

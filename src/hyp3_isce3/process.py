@@ -2,7 +2,9 @@
 
 import argparse
 import logging
+import shutil
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -442,11 +444,41 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     return product_id
 
 
+def _staged(cache_dir: str | None, name: str, produce: Callable[[], str]) -> str:
+    """Return ``cache_dir/name``, running ``produce`` only on a cache miss.
+
+    Lets the demo reuse already-downloaded/cropped inputs across runs: the first run
+    downloads or crops and stashes the result under ``name``; a later run with the same
+    ``cache_dir`` finds it and skips the work. With ``cache_dir=None`` this is a no-op
+    passthrough that just calls ``produce`` (the normal fetch-every-time behavior).
+
+    Args:
+        cache_dir: Directory of cached inputs, or None to disable caching.
+        name: Deterministic filename for this artifact inside ``cache_dir``.
+        produce: Zero-arg callback that downloads/crops and returns the produced path.
+
+    Returns:
+        Path (as str) of the cached (or freshly produced) file.
+    """
+    if cache_dir is None:
+        return produce()
+    target = Path(cache_dir) / name
+    if target.exists():
+        log.info('reusing cached %s', target)
+        return str(target)
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    produced = Path(produce())
+    if produced.resolve() != target.resolve():
+        shutil.move(str(produced), str(target))
+    return str(target)
+
+
 def process_isce3(
     reference_scene: str,
     secondary_scene: str,
     subset: list[float] | None = None,
     overrides: dict | None = None,
+    cache_dir: str | None = None,
 ) -> Path:
     """Get Polygon for reference scene.
 
@@ -455,6 +487,11 @@ def process_isce3(
         secondary_scene: Name of the secondary scene.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
         overrides: Optional runconfig overrides (under ``groups``); only existing keys may be set.
+        cache_dir: Optional directory of pre-fetched inputs. When set, every downloaded/cropped
+            input (skeletons, cropped RSLCs, orbits, TEC, water mask, DEM) is stashed here on the
+            first run and reused on later runs -- so a demo populated once reruns without
+            re-downloading or re-cropping. The cropped RSLCs are stored as ``<scene>_sub.h5``,
+            matching the demo subset script, so pre-cropped RSLCs are picked up directly.
 
     Returns:
         h5file: Path of the GUNW h5file.
@@ -465,18 +502,18 @@ def process_isce3(
     if subset:
         # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
         # product in every pre-crop step, and the image window is streamed by crop_streamed.
-        reference_path = str(stream_skeleton(reference_scene))
-        secondary_path = str(stream_skeleton(secondary_scene))
+        reference_path = _staged(cache_dir, f'{reference_scene}_skel.h5', lambda: str(stream_skeleton(reference_scene)))
+        secondary_path = _staged(cache_dir, f'{secondary_scene}_skel.h5', lambda: str(stream_skeleton(secondary_scene)))
     else:
-        reference_path = download_rslc(reference_scene)
-        secondary_path = download_rslc(secondary_scene)
+        reference_path = _staged(cache_dir, f'{reference_scene}.h5', lambda: download_rslc(reference_scene))
+        secondary_path = _staged(cache_dir, f'{secondary_scene}.h5', lambda: download_rslc(secondary_scene))
 
     # When subsetting, stage the water mask and DEM over the AOI only (orbit/tropo/tec
     # are temporal, so they are unaffected by the subset).
-    watermask = get_watermask(reference_path, subset)
+    watermask = _staged(cache_dir, 'watermask.tif', lambda: get_watermask(reference_path, subset))
 
-    reference_orbit = get_orbit(reference_scene)
-    secondary_orbit = get_orbit(secondary_scene)
+    reference_orbit = _staged(cache_dir, f'{reference_scene}_orbit.xml', lambda: get_orbit(reference_scene))
+    secondary_orbit = _staged(cache_dir, f'{secondary_scene}_orbit.xml', lambda: get_orbit(secondary_scene))
 
     # Demo config: tropo + iono corrections are disabled so runs stay fast and focus on the
     # interferogram/parameter behavior. Skipping tropo also avoids the ~2 GB-each ECMWF
@@ -489,14 +526,15 @@ def process_isce3(
     reference_tropo = get_tropo(reference_scene) if run_troposphere else watermask
     secondary_tropo = get_tropo(secondary_scene) if run_troposphere else watermask
 
-    tec_path = get_tec(reference_scene)
+    tec_path = _staged(cache_dir, 'tec.json', lambda: get_tec(reference_scene))
 
     scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
-    dem_path = get_dem(scene_polygon, epsg_code)
+    dem_path = _staged(cache_dir, 'dem.tif', lambda: get_dem(scene_polygon, epsg_code))
 
     # The JPL runconfig is both our config template (its tail) and the source of the
-    # crossmul looks the crop aligns to; download once and reuse for both.
-    template_yaml = download_yaml(reference_path)
+    # crossmul looks the crop aligns to; download once and reuse for both. Keyed off the
+    # granule name (not the file path) so a cache_dir prefix cannot shift its keyword split.
+    template_yaml = download_yaml(reference_scene)
 
     # Apply user runconfig overrides before anything reads the template, so the crossmul
     # looks and geocode grid the crop snaps to track any overridden values too.
@@ -521,11 +559,17 @@ def process_isce3(
         az_looks, rg_looks = get_crossmul_looks(template_yaml)
         # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.
-        reference_path = crop_streamed(
-            reference_scene, reference_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
+        # Cache the cropped products so demo reruns skip the (slow) streaming crop.
+        reference_skel, secondary_skel = reference_path, secondary_path
+        reference_path = _staged(
+            cache_dir,
+            f'{reference_scene}_sub.h5',
+            lambda: crop_streamed(reference_scene, reference_skel, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks),
         )
-        secondary_path = crop_streamed(
-            secondary_scene, secondary_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
+        secondary_path = _staged(
+            cache_dir,
+            f'{secondary_scene}_sub.h5',
+            lambda: crop_streamed(secondary_scene, secondary_skel, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks),
         )
 
     yaml_path = get_config(

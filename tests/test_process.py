@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyp3_isce3.process import apply_overrides, get_config, get_crossmul_looks
+from hyp3_isce3.process import _staged, apply_overrides, get_config, get_crossmul_looks
 
 
 def _runconfig(tmp_path: Path) -> Path:
@@ -47,6 +47,57 @@ def test_apply_overrides_leaf_as_section_raises(tmp_path):
     rc = _runconfig(tmp_path)
     with pytest.raises(KeyError, match='leaf'):
         apply_overrides(rc, {'processing.crossmul.range_looks': {'nope': 1}})
+
+
+def test_staged_no_cache_dir_is_passthrough(tmp_path):
+    src = tmp_path / 'produced.bin'
+    src.write_text('x')
+    calls = []
+
+    def produce():
+        calls.append(1)
+        return str(src)
+
+    # With cache_dir=None, _staged just returns produce()'s path every time.
+    assert _staged(None, 'name.bin', produce) == str(src)
+    assert _staged(None, 'name.bin', produce) == str(src)
+    assert len(calls) == 2
+
+
+def test_staged_caches_and_reuses(tmp_path):
+    cache = tmp_path / 'cache'
+    calls = []
+
+    def produce():
+        calls.append(1)
+        # produce() writes its own file somewhere; _staged moves it into the cache.
+        out = tmp_path / 'fresh.bin'
+        out.write_text('data')
+        return str(out)
+
+    # First call: cache miss -> produce runs, result stashed under the deterministic name.
+    first = _staged(str(cache), 'orbit.xml', produce)
+    assert first == str(cache / 'orbit.xml')
+    assert (cache / 'orbit.xml').read_text() == 'data'
+    assert not (tmp_path / 'fresh.bin').exists()  # moved, not copied
+
+    # Second call: cache hit -> produce is NOT run, cached path returned.
+    second = _staged(str(cache), 'orbit.xml', produce)
+    assert second == str(cache / 'orbit.xml')
+    assert len(calls) == 1
+
+
+def test_staged_already_at_target_not_moved(tmp_path):
+    cache = tmp_path / 'cache'
+    cache.mkdir()
+    target = cache / 'dem.tif'
+    target.write_text('dem')
+
+    # produce() returns a path that is already the cache target (e.g. a pre-placed crop) --
+    # _staged must not try to move a file onto itself.
+    result = _staged(str(cache), 'dem.tif', lambda: str(target))
+    assert result == str(target)
+    assert target.read_text() == 'dem'
 
 
 def test_get_config(monkeypatch, tmp_path):
