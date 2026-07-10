@@ -29,6 +29,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 develop = [
+    "setuptools_scm",
     "mypy",
     "ruff",
     "pytest",
