@@ -242,3 +242,6 @@ tags
 [._]*.un~
 
 .DS_Store
+
+# local demo data (large; not committed)
+local/
