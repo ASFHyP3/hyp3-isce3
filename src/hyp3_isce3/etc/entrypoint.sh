@@ -1,4 +1,3 @@
 #!/bin/bash --login
 set -e
-conda activate hyp3-isce3
-exec python -um hyp3_isce3 "$@"
+pixi run python -m hyp3_isce3 "$@"
