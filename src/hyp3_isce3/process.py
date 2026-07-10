@@ -487,11 +487,12 @@ def process_isce3(
         secondary_scene: Name of the secondary scene.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
         overrides: Optional runconfig overrides (under ``groups``); only existing keys may be set.
-        cache_dir: Optional directory of pre-fetched inputs. When set, every downloaded/cropped
-            input (skeletons, cropped RSLCs, orbits, TEC, water mask, DEM) is stashed here on the
-            first run and reused on later runs -- so a demo populated once reruns without
-            re-downloading or re-cropping. The cropped RSLCs are stored as ``<scene>_sub.h5``,
-            matching the demo subset script, so pre-cropped RSLCs are picked up directly.
+        cache_dir: Optional directory of pre-fetched inputs. When set, the downloaded/cropped
+            inputs (skeletons, cropped RSLCs, orbits, TEC, DEM) are stashed here on the first run
+            and reused on later runs -- so a demo populated once reruns without re-downloading or
+            re-cropping. The cropped RSLCs are stored as ``<scene>_sub.h5``, matching the demo
+            subset script, so pre-cropped RSLCs are picked up directly. The water mask is refetched
+            every run (it is a VRT mosaic that cannot be safely relocated into the cache).
 
     Returns:
         h5file: Path of the GUNW h5file.
@@ -510,7 +511,10 @@ def process_isce3(
 
     # When subsetting, stage the water mask and DEM over the AOI only (orbit/tropo/tec
     # are temporal, so they are unaffected by the subset).
-    watermask = _staged(cache_dir, 'watermask.tif', lambda: get_watermask(reference_path, subset))
+    # The water mask is NOT cached: get_watermask returns a VRT mosaic that references sibling
+    # tile .tifs by path, so relocating just the VRT into cache_dir breaks those references.
+    # It is a cheap refetch (a handful of small tiles), so refetch it every run.
+    watermask = get_watermask(reference_path, subset)
 
     reference_orbit = _staged(cache_dir, f'{reference_scene}_orbit.xml', lambda: get_orbit(reference_scene))
     secondary_orbit = _staged(cache_dir, f'{secondary_scene}_orbit.xml', lambda: get_orbit(secondary_scene))
@@ -530,6 +534,14 @@ def process_isce3(
 
     scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
     dem_path = _staged(cache_dir, 'dem.tif', lambda: get_dem(scene_polygon, epsg_code))
+    # The runconfig schema references the DEM by the relative name ``dem.tif`` (it is the one
+    # ancillary not threaded through get_config). When served from a cache_dir the DEM lives
+    # elsewhere, so link it into the working dir to keep that relative reference resolvable.
+    if Path('dem.tif').resolve() != Path(dem_path).resolve():
+        dem_link = Path('dem.tif')
+        if dem_link.is_symlink() or dem_link.exists():
+            dem_link.unlink()
+        dem_link.symlink_to(Path(dem_path).resolve())
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # crossmul looks the crop aligns to; download once and reuse for both. Keyed off the
