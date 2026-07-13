@@ -1,0 +1,10 @@
+mintpy.load.processor        = nisar
+##---------geometry datasets:
+mintpy.load.demFile          = ../dem.tif
+##---------interferogram datasets:
+mintpy.load.unwFile          = ../*.h5
+mintpy.network.minCoherence    = 0.97
+mintpy.networkInversion.minTempCoh  = 0.97
+mintpy.reference.minCoherence  = 0.97
+mintpy.troposphericDelay.method = no
+mintpy.deramp          = linear
