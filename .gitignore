@@ -245,3 +245,10 @@ tags
 
 # local demo data (large; not committed)
 local/
+scratchpad/
+# isce3 run artifacts dropped in the repo root by a local job
+data/
+temp.yaml
+insar.yaml
+runconfig_template.yaml
+*.bak
