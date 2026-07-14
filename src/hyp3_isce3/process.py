@@ -536,7 +536,10 @@ def process_isce3(
     reference_tropo = get_tropo(reference_scene) if run_troposphere else watermask
     secondary_tropo = get_tropo(secondary_scene) if run_troposphere else watermask
 
-    tec_path = _staged(cache_dir, 'tec.json', lambda: get_tec(reference_scene))
+    # Keyed on the reference scene: TEC is time-specific, and isce3 rejects a TEC file that does not
+    # bracket the radar sensing window. An unkeyed name would serve one run's TEC to a later run with
+    # a different reference date, which fails the temporal-coverage check at config load.
+    tec_path = _staged(cache_dir, f'{reference_scene}_tec.json', lambda: get_tec(reference_scene))
 
     scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
     dem_path = _staged(cache_dir, 'dem.tif', lambda: get_dem(scene_polygon, epsg_code))
@@ -552,7 +555,16 @@ def process_isce3(
     # The JPL runconfig is both our config template (its tail) and the source of the
     # crossmul looks the crop aligns to; download once and reuse for both. Keyed off the
     # granule name (not the file path) so a cache_dir prefix cannot shift its keyword split.
-    template_yaml = download_yaml(reference_scene)
+    #
+    # Cached alongside the other ancillaries so a warm cache_dir needs no runconfig download.
+    # Copied to a working file first: apply_overrides rewrites the template in place, and the
+    # cached copy must stay pristine -- otherwise a later run with different overrides would
+    # silently inherit this run's values for any key it does not set itself.
+    cached_yaml = _staged(
+        cache_dir, f'{reference_scene}_runconfig.yaml', lambda: str(download_yaml(reference_scene))
+    )
+    template_yaml = Path('runconfig_template.yaml')
+    shutil.copy(cached_yaml, template_yaml)
 
     # Apply user runconfig overrides before anything reads the template, so the crossmul
     # looks and geocode grid the crop snaps to track any overridden values too.

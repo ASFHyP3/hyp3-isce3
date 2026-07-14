@@ -224,3 +224,35 @@ def test_get_config_subset(monkeypatch, tmp_path):
     assert text.count('x_abs: 300.0') == 2 and text.count('y_abs: 200.0') == 2
     # dem_download uses x/y (not x_abs/y_abs) and is left untouched.
     assert all(s in text for s in ('x: 1.0', 'y: 2.0', 'x: 3.0', 'y: 4.0'))
+
+
+def test_cached_runconfig_stays_pristine(tmp_path):
+    """A cached runconfig must not be mutated by apply_overrides.
+
+    process_isce3 caches the JPL runconfig, but apply_overrides rewrites its target in place.
+    So it overrides a *copy*: if it overrode the cached file directly, a later run would inherit
+    this run's values for every key it did not set itself -- e.g. rerunning with new looks would
+    silently keep the first run's 20 m posting.
+    """
+    import shutil
+
+    downloaded = _runconfig(tmp_path)
+    pristine = downloaded.read_text()
+
+    cache = tmp_path / 'cache'
+    cached = _staged(str(cache), 'ref_runconfig.yaml', lambda: str(downloaded))
+    assert Path(cached).read_text() == pristine
+
+    # Run 1: override looks on a working copy (what process_isce3 does).
+    work1 = tmp_path / 'work1.yaml'
+    shutil.copy(cached, work1)
+    apply_overrides(work1, {'processing.crossmul.range_looks': 2})
+    assert Path(cached).read_text() == pristine, 'cached runconfig was mutated'
+
+    # Run 2 with *different* overrides must start pristine, not inherit run 1's looks.
+    work2 = tmp_path / 'work2.yaml'
+    shutil.copy(cached, work2)
+    apply_overrides(work2, {'processing.crossmul.azimuth_looks': 3})
+    proc = yaml.safe_load(work2.read_text())['runconfig']['groups']['processing']
+    assert proc['crossmul']['azimuth_looks'] == 3
+    assert proc['crossmul']['range_looks'] != 2, 'run 2 inherited run 1 overrides'
