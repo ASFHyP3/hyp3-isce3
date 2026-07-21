@@ -549,7 +549,9 @@ def open_remote_rslc(scene_name: str) -> h5py.File:
     """Open a NISAR RSLC over byte-range as an h5py handle (no full download)."""
     results = earthaccess.search_data(short_name=RSLC_SHORT_NAME, readable_granule_name=scene_name)
     if len(results) == 0:
-        raise ValueError(f'No {RSLC_SHORT_NAME} granule found for {scene_name}')
+        results = earthaccess.search_data(short_name=RSLC_SHORT_NAME_PROV, readable_granule_name=scene_name)
+        if len(results) == 0:
+            raise ValueError(f'No {RSLC_SHORT_NAME} or {RSLC_SHORT_NAME_PROV} granule found for {scene_name}')
     # earthaccess.open() handles auth + the S3/HTTPS redirect and block-caches reads.
     fileobj = earthaccess.open(results[:1])[0]
     return h5py.File(fileobj, 'r', driver='fileobj')
