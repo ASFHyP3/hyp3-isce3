@@ -542,6 +542,7 @@ def write_skeleton(src: h5py.File, skeleton_h5: str | Path) -> Path:
 
 # CMR collection of the NISAR L1 RSLC granules (BETA, matching the rest of the pipeline).
 RSLC_SHORT_NAME = 'NISAR_L1_RSLC_BETA_V1'
+RSLC_SHORT_NAME_PROV = 'NISAR_L1_RSLC_PROVISIONAL_V1'
 
 
 def open_remote_rslc(scene_name: str) -> h5py.File:
