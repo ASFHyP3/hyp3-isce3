@@ -4,14 +4,23 @@ The HyP3-ISCE3 plugin provides a workflow to process SAR satellite data using th
 
 ## Usage
 
-The HyP3-ISCE3 plugin provides a workflow (accessible directly in Python or via a CLI) for creating burst-based NISAR geocoded unwrapped interferogram using ISCE3 workflow.
+The HyP3-ISCE3 plugin provides a workflow (accessible directly in Python or via a CLI) for creating NISAR geocoded unwrapped interferogram using ISCE3 workflow.
 
 To run the workflow:
 
 ```
 python -m hyp3_isce3 \
-  --reference NISAR_L1_PR_RSLC_005_172_A_008_2005_DHDH_A_20251122T024618_20251122T024652_X05007_N_F_J_001 \
-  --secondary NISAR_L1_PR_RSLC_006_172_A_008_2005_DHDH_A_20251204T024618_20251204T024653_X05007_N_F_J_001 
+  NISAR_L1_PR_RSLC_005_172_A_008_2005_DHDH_A_20251122T024618_20251122T024652_X05007_N_F_J_001 \
+  NISAR_L1_PR_RSLC_006_172_A_008_2005_DHDH_A_20251204T024618_20251204T024653_X05007_N_F_J_001 
+```
+
+The processing time can be reduced by using the `subset` parameter and a bounding box in the format `LON_MIN LAT_MIN LON_MAX LAT_MAX`:
+
+```
+python -m hyp3_isce3 \
+  NISAR_L1_PR_RSLC_005_172_A_008_2005_DHDH_A_20251122T024618_20251122T024652_X05007_N_F_J_001 \
+  NISAR_L1_PR_RSLC_006_172_A_008_2005_DHDH_A_20251204T024618_20251204T024653_X05007_N_F_J_001 \
+  --subset 40.55 13.46 40.78 13.65
 ```
 
 ### Earthdata Login Credentials
@@ -60,19 +69,26 @@ Tip: you can use [`docker run --env-file`](https://docs.docker.com/reference/cli
 
 ## Developer Setup
 
-1. Ensure that conda is installed on your system (we recommend using [mambaforge](https://github.com/conda-forge/miniforge#mambaforge) to reduce setup times).
-2. Download a local version of the `hyp3-isce3` repository (`git clone https://github.com/ASFHyP3/hyp3-isce3.git`)
-3. In the base directory for this project call `mamba env create -f environment.yml` to create your Python environment, then activate it (`mamba activate hyp3-isce3`)
-4. Finally, install a development version of the package (`python -m pip install -e .`)
+1. Ensure that pixi is installed on your system: <https://pixi.sh/latest/installation/>.
+2. Clone the `hyp3-isce3` repository and navigate to the root directory of this project
+   ```bash
+   git clone https://github.com/ASFHyP3/hyp3-isce3.git
+   cd hyp3-isce3
+   ```
+3. setup the development environment
+   ```bash
+    pixi run install-editable
+   ```
+4. (optional) [traditional conda-like activation](https://pixi.sh/latest/workspace/environment/#traditional-conda-activate-like-activation) of the pixi environment
+   ```bash
+   eval "$(pixi shell-hook)"
+   ```
 
-To run all commands in sequence use:
-```bash
-git clone https://github.com/ASFHyP3/hyp3-isce3.git
-cd hyp3-isce3
-mamba env create -f environment.yml
-mamba activate hyp3-isce3
-python -m pip install -e .
-```
+    > [!TIP]
+    > If you've done (4), you don't need to prefix commands with `pixi run`.
+5. (optional) Setup you IDE to work with pixi:
+   * PyCharm: https://pixi.sh/dev/integration/editor/jetbrains/
+   * VSCode: https://pixi.sh/dev/integration/editor/vscode/
 
 ## Background
 

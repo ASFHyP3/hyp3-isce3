@@ -9,12 +9,17 @@ from pathlib import Path
 import asf_search as asf
 import earthaccess
 import utm
+import yaml
 from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import ogr, osr
 
 import hyp3_isce3
+from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
+
+
+asf.constants.INTERNAL.CMR_TIMEOUT = 90
 
 
 log = logging.getLogger(__name__)
@@ -29,6 +34,9 @@ def get_config(
     secondary_tropo: str,
     tec_path: str,
     watermask: str,
+    template_yaml: Path,
+    subset_utm: tuple[float, float, float, float] | None = None,
+    output_epsg: int | None = None,
 ) -> Path:
     """Create a configuration file for isce3.
 
@@ -41,24 +49,29 @@ def get_config(
         secondary_tropo: Path of the ECMWF file for the secondary scene.
         tec_path: Path of the TEC file for the reference scene.
         watermask: Path of the water mask file.
+        template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`) used as the tail/template.
+        subset_utm: Optional (xmin, ymin, xmax, ymax) output box in UTM meters.
+        output_epsg: EPSG code of ``subset_utm``; written into the geocode blocks so the corners and projection stay consistent.
 
     Returns:
         yaml_file: Path of the configuration file.
     """
-    tmp_yaml = download_yaml(reference_path)
-    with tmp_yaml.open('r') as yaml:
-        lines_tmp = yaml.readlines()
+    # Keep the downloaded runconfig's tail (product_path_group on) and splice our
+    # schema header in front. The caller owns template_yaml, so we don't delete it.
+    with Path(template_yaml).open('r') as f:
+        lines_tmp = f.readlines()
         for first, line in enumerate(lines_tmp):
             if 'product_path_group:' in line:
                 break
-    tmp_yaml.unlink()
 
+    # Our shipped schema is the header (input/ancillary file groups) with
+    # placeholder tokens standing in for the real scene/orbit/ancillary paths.
     yaml_schema = Path(hyp3_isce3.__file__).parent / 'schemas' / 'insar.yaml'
-    with yaml_schema.open('r') as yaml:
-        lines = yaml.readlines()
+    with yaml_schema.open('r') as f:
+        lines = f.readlines()
 
     yaml_file = Path('insar.yaml')
-    with yaml_file.open('w') as yaml:
+    with yaml_file.open('w') as out:
         for line in lines:
             newstring = ''
             if 'reference_scene' in line:
@@ -79,12 +92,46 @@ def get_config(
                 newstring += line.replace('watermask', watermask)
             else:
                 newstring = line
-            yaml.write(newstring)
+            out.write(newstring)
 
+        # Pin the geocode and radar_grid_cubes output grids to the AOI and projection.
+        # The RSLC crop carries a margin, so this geocode box is the final crop.
+        xmin, ymin, xmax, ymax = subset_utm if subset_utm else (None, None, None, None)
+        corner = 0
         for line in lines_tmp[first::]:
-            yaml.write(line)
+            if subset_utm is None:
+                pass
+            elif 'output_epsg' in line:
+                line = f'{line.partition(":")[0]}: {output_epsg}\n'
+            elif 'top_left' in line:
+                corner = 1
+            elif 'bottom_right' in line:
+                corner = 2
+            elif corner and 'x_abs' in line:
+                line = f'{line.partition(":")[0]}: {xmin if corner == 1 else xmax}\n'
+            elif corner and 'y_abs' in line:
+                line = f'{line.partition(":")[0]}: {ymax if corner == 1 else ymin}\n'
+            out.write(line)
 
     return Path('insar.yaml')
+
+
+def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
+    """Read the InSAR crossmul (azimuth, range) multilook looks from the runconfig template.
+
+    The RSLC crop floors its window origin to these so the crop's multilook cells
+    coincide with a full-frame run. Sourcing them from the same runconfig the
+    workflow runs guarantees the two never drift. If looks are ever exposed as a
+    user/processing parameter, read that parameter here instead so the crop tracks it.
+
+    Args:
+        template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`).
+
+    Returns:
+        looks: (azimuth_looks, range_looks) from the runconfig ``crossmul`` block.
+    """
+    crossmul = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['crossmul']
+    return int(crossmul['azimuth_looks']), int(crossmul['range_looks'])
 
 
 def download_yaml(reference_path: str) -> Path:
@@ -201,18 +248,24 @@ def get_tec(scene_name: str) -> str:
     return str(files[-1])
 
 
-def get_watermask(reference_path: str) -> str:
+def get_watermask(reference_path: str, subset: list[float] | None = None) -> str:
     """Download files to apply ionospheric corrections.
 
     Args:
         reference_path: Path of the reference scene.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the mask
+            is fetched over the AOI instead of the whole frame (the 1-degree buffer
+            below covers the crop margin).
 
     Returns:
         tropo_path: Path of the file.
     """
     short_name = 'NISAR_WATERMASK'
-    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
-    bbox = poly.bounds
+    if subset is None:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+        bbox = poly.bounds
+    else:
+        bbox = subset
     bbox = (bbox[0] - 1, bbox[1] - 1, bbox[2] + 1, bbox[3] + 1)
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
@@ -259,19 +312,28 @@ def get_epsg(lat: float, lon: float) -> int:
     return epsg_base + zone_number
 
 
-def get_scene_polygon(reference_path: str) -> ogr.Geometry:
+def get_scene_polygon(reference_path: str, subset: list[float] | None = None) -> ogr.Geometry:
     """Get Polygon for reference scene.
 
     Args:
         reference_path: Path of the downloaded h5 file.
-        epsg_code: EPSG code for the polygon coordinates.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM is
+            staged over the AOI (plus a buffer for the crop margin and radar-processing
+            edges) instead of the whole frame. EPSG is still taken from the full scene.
 
     Returns:
         geom: Polygon of the reference scene.
     """
     poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
     epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
-    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=str(epsg_code))
+    if subset is None:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=str(epsg_code))
+    else:
+        # Buffer the AOI past the 512-px crop margin's ground extent (~5-6 km); the
+        # extra apply_margin_to_geographic_box 5 km below then adds further headroom.
+        buf = 0.1  # degrees (~11 km)
+        bbox = [subset[0] - buf, subset[1] - buf, subset[2] + buf, subset[3] + buf]
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=bbox, bbox_epsg='4326')
     poly = stage_dem.apply_margin_to_geographic_box(poly)
     geom = ogr.CreateGeometryFromWkt(str(poly))
 
@@ -307,12 +369,13 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     return product_id
 
 
-def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
+def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float] | None = None) -> Path:
     """Get Polygon for reference scene.
 
     Args:
         reference_scene: Name of the reference scene.
         secondary_scene: Name of the secondary scene.
+        subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
 
     Returns:
         h5file: Path of the GUNW h5file.
@@ -320,10 +383,18 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
     product_id = get_product_id(reference_scene, secondary_scene)
 
     earthaccess.login()
-    reference_path = download_rslc(reference_scene)
-    secondary_path = download_rslc(secondary_scene)
+    if subset:
+        # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
+        # product in every pre-crop step, and the image window is streamed by crop_streamed.
+        reference_path = str(stream_skeleton(reference_scene))
+        secondary_path = str(stream_skeleton(secondary_scene))
+    else:
+        reference_path = download_rslc(reference_scene)
+        secondary_path = download_rslc(secondary_scene)
 
-    watermask = get_watermask(reference_path)
+    # When subsetting, stage the water mask and DEM over the AOI only (orbit/tropo/tec
+    # are temporal, so they are unaffected by the subset).
+    watermask = get_watermask(reference_path, subset)
 
     reference_orbit = get_orbit(reference_scene)
     secondary_orbit = get_orbit(secondary_scene)
@@ -333,8 +404,31 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
 
     tec_path = get_tec(reference_scene)
 
-    scene_polygon, epsg_code = get_scene_polygon(reference_path)
-    _ = get_dem(scene_polygon, epsg_code)
+    scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
+    dem_path = get_dem(scene_polygon, epsg_code)
+
+    # The JPL runconfig is both our config template (its tail) and the source of the
+    # crossmul looks the crop aligns to; download once and reuse for both.
+    template_yaml = download_yaml(reference_path)
+
+    # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
+    # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
+    subset_utm = None
+    if subset:
+        # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
+        # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
+        # decorrelated areas).
+        subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
+        az_looks, rg_looks = get_crossmul_looks(template_yaml)
+        # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
+        # independently from its own orbit; only overlapping image chunks are pulled.
+        reference_path = crop_streamed(
+            reference_scene, reference_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
+        )
+        secondary_path = crop_streamed(
+            secondary_scene, secondary_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
+        )
+
     yaml_path = get_config(
         reference_path,
         secondary_path,
@@ -344,7 +438,12 @@ def process_isce3(reference_scene: str, secondary_scene: str) -> Path:
         secondary_tropo,
         tec_path,
         watermask,
+        template_yaml,
+        subset_utm,
+        epsg_code,
     )
+    template_yaml.unlink()  # consumed by the looks read and the config build
+
     args = argparse.Namespace(run_config_path=str(yaml_path), log_file=False)
     insar_runcfg = InsarRunConfig(args)
 
