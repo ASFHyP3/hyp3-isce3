@@ -7,7 +7,7 @@ runconfig:
 
         input_file_group:
             # REQUIRED - One NISAR L1 RSLC formatted HDF5 file
-            input_file_path:
+            input_file_path: reference_scene
 
             # REQUIRED for QA. NOT REQUIRED if only running Product SAS.
             # If Product SAS and QA SAS are run back-to-back,
@@ -18,7 +18,7 @@ runconfig:
 
         dynamic_ancillary_file_group:
             # REQUIRED - Digital elevation model
-            dem_file:
+            dem_file: dem_for_scene
 
             # Description of the digital elevation model (DEM) file  
             # to be included in the output product metadata
@@ -36,7 +36,7 @@ runconfig:
             product_path: product_path
 
             # Directory where SAS can write temporary data
-            scratch_path: .
+            scratch_path: scratch/
 
             # Output file in the HDF5 format
             sas_output_file: gcov.h5
@@ -569,13 +569,13 @@ runconfig:
                 # Flag to run `validate` workflow to validate the
                 # input file against its product spec.
                 # Default: True
-                validate: true
+                validate: false
 
                 # Flag to run `qa_reports` workflow to generate a
                 # PDF report, geolocated browse image, compute statistics
                 # on the input file, etc..
                 # Default: True
-                qa_reports: true
+                qa_reports: false
 
             software_config:
 

@@ -13,7 +13,8 @@ runconfig:
             # - PATH_TO_L0B_FILE_1.h5
             # - PATH_TO_L0B_FILE_2.h5
             # - PATH_TO_L0B_FILE_3.h5
-            input_file_path: reference_scene
+            input_file_path:
+            - reference_scene
 
             # Filename of the input file for QA.
             # REQUIRED for QA. NOT REQUIRED if only running Product SAS.
@@ -538,7 +539,7 @@ runconfig:
                 # range compression
                 rangecomp: True
                 # elevation antenna pattern correction
-                eap: True
+                eap: False # TODO: 
                 # R^4 spreading loss correction
                 range_cor: True
                 # azimuth compression

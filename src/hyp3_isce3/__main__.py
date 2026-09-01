@@ -9,7 +9,7 @@ from pathlib import Path
 from hyp3lib.aws import upload_file_to_s3
 from hyp3lib.fetch import write_credentials_to_netrc_file
 
-from hyp3_isce3.process import process_isce3_insar, process_isce3_focus
+from hyp3_isce3.process import process_isce3_insar, process_isce3_focus, process_isce3_gcov
 
 
 def nullable_subset_list(subset_string: str) -> list[str]:
@@ -103,10 +103,13 @@ def main() -> None:
             secondary_scene=secondary_granule,
             subset=args.subset,
         )
-    else:
+    elif reference_granule.startswith('NISAR_L0'):
         product_file = process_isce3_focus(
             reference_scene=reference_granule,
-            subset=args.subset,
+        )
+    elif reference_granule.startswith('NISAR_L1') or reference_granule == 'slc.h5':
+        product_file = process_isce3_gcov(
+            reference_scene=reference_granule,
         )
 
     if args.bucket:
