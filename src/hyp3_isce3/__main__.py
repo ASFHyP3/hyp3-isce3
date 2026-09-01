@@ -9,7 +9,7 @@ from pathlib import Path
 from hyp3lib.aws import upload_file_to_s3
 from hyp3lib.fetch import write_credentials_to_netrc_file
 
-from hyp3_isce3.process import process_isce3
+from hyp3_isce3.process import process_isce3_insar, process_isce3_focus
 
 
 def nullable_subset_list(subset_string: str) -> list[str]:
@@ -65,8 +65,9 @@ def main() -> None:
     args = parser.parse_args()
 
     args.granules = [item for sublist in args.granules for item in sublist]
-    if len(args.granules) != 2:
-        parser.error('Must provide exactly two granules')
+    # TODO: Handle single L0B granule
+    # if len(args.granules) != 2:
+    #     parser.error('Must provide exactly two granules')
 
     if args.subset is not None:
         args.subset = [float(item) for sublist in args.subset for item in sublist]
@@ -87,17 +88,26 @@ def main() -> None:
             UserWarning,
         )
 
-    reference_granule, secondary_granule = earlier_granule_first(*args.granules)
+    if len(args.granules) == 2:
+        reference_granule, secondary_granule = earlier_granule_first(*args.granules)
+    else:
+        reference_granule = args.granules[0]
 
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO
     )
 
-    product_file = process_isce3(
-        reference_scene=reference_granule,
-        secondary_scene=secondary_granule,
-        subset=args.subset,
-    )
+    if len(args.granules) == 2:
+        product_file = process_isce3_insar(
+            reference_scene=reference_granule,
+            secondary_scene=secondary_granule,
+            subset=args.subset,
+        )
+    else:
+        product_file = process_isce3_focus(
+            reference_scene=reference_granule,
+            subset=args.subset,
+        )
 
     if args.bucket:
         upload_file_to_s3(product_file, args.bucket, args.bucket_prefix)

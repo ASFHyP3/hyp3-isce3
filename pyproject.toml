@@ -37,6 +37,9 @@ develop = [
     "pytest-cov",
 ]
 
+[project.scripts]
+hyp3_isce3 = "hyp3_isce3.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/ASFHyP3/hyp3-isce3"
 Documentation = "https://hyp3-docs.asf.alaska.edu"

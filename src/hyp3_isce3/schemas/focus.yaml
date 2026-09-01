@@ -1,0 +1,978 @@
+# Structure inherited from L0 PGEs covers inputs, outputs, and identification.
+runconfig:
+    groups:
+        input_file_group:
+            # REQUIRED List of NISAR raw data products in L0B format.
+            #
+            # Example for single-mode processing:
+            # input_file_path:
+            # - PATH_TO_L0B_FILE.h5
+            #
+            # Example for mixed-mode processing:
+            # input_file_path:
+            # - PATH_TO_L0B_FILE_1.h5
+            # - PATH_TO_L0B_FILE_2.h5
+            # - PATH_TO_L0B_FILE_3.h5
+            input_file_path:
+            - "/media/andrew/large/Downloads/NISAR_L0_PR_RRSD_003_108_D_148S_20251024T164737_20251024T164933_X05009_N_J_001.h5"
+
+            # Filename of the input file for QA.
+            # REQUIRED for QA. NOT REQUIRED if only running Product SAS.
+            # If Product SAS and QA SAS are run back-to-back,
+            # this field should be identical to `sas_output_file`.
+            # Otherwise, this field should contain the filename of the single
+            # NISAR product for QA to process.
+            # REQUIRED
+            qa_input_file: ./slc.h5
+
+        dynamic_ancillary_file_group:
+            # Digital elevation model, optional.
+            dem_file: "dem.tif"
+
+            # PLACEHOLDER - Digital elevation model file description, optional
+            dem_file_description:
+
+            # Refined orbit, optional.
+            # Defaults to orbit within L0B product.
+            orbit: null
+
+            # Refined pointing, optional.
+            # Defaults to attitude within L0B product.
+            pointing: null
+
+            # External calibration data, optional.
+            # Defaults to no extra calibration gain, phase, delay, etc.
+            external_calibration: null
+
+            # Internal calibration tables, optional.
+            # If not provided, no secondary elevation antenna pattern correction.
+            internal_calibration: null
+
+            # Antenna pattern data, optional.
+            # Defaults to sinc^4 pattern using nominal antenna dimensions.
+            antenna_pattern: null
+
+            # File containing the locations of the corner reflectors
+            # in the input product.
+            # Required for `absolute_radiometric_calibration` and/or
+            # `point_target_analyzer` QA-CalTools workflows to generate results.
+            # If a file is not provided, or if the corner file has no useful data
+            # for the given input product, then no results will be generated.
+            corner_reflector_file: null
+
+        product_path_group:
+            # Directory where PGE will place results. Irrelevant to SAS.
+            product_path: /out
+            # Directory where SAS can write temporary data
+            scratch_path: .
+            # SAS writes output product to the following file. PGE may rename.
+            sas_output_file: ./slc.h5
+            # Echo processor config (including defaults) to file.
+            sas_config_file: null
+
+            # REQUIRED for QA. NOT REQUIRED if only running Product SAS.
+            # Output directory to store all QA output files.
+            # Defaults to './qa'
+            qa_output_dir: ./qa
+
+        primary_executable:
+            # Handy to set to "SLC" until other ISCE tools updated.
+            product_type: RSLC
+            product_version: 0.1.0
+            product_doi: (NOT SPECIFIED)
+            composite_release_id: A10000
+            processing_type: Custom
+            mission_id: null  # null to get from first L0B input
+            processing_center: JPL
+            partial_granule_id: (NOT SPECIFIED)
+
+        geometry:
+            relative_orbit_number: 1
+            frame_number: 1
+            # The polygon for the reference track/frame in a GeoJSON formatted
+            # string.  If empty the coverage indicator in the granule_id will
+            # be 'X'.
+            track_frame_polygon: '{"type": "Polygon", "coordinates": [[]]}'
+            # Minimum frame coverage required to be considered "full frame".
+            # (Also only relevant to the granule ID in the output product.)
+            full_coverage_threshold_percent: 75.0
+
+        worker:
+            # Whether or not to use GPU, optional. Defaults to True if available.
+            gpu_enabled: True
+
+            # Index of the GPU to use for processing, optional. Defaults to the
+            # first available CUDA device. Ignored if *gpu_enabled* is False.
+            gpu_id: 0
+
+        processing:
+            output_grid:
+                # Azimuth bounds of output SLC, optional.
+                # Defaults to extent of raw data minus sythetic aperture and
+                # shifted by squint.
+                start_time: null
+                end_time: null
+
+                # Range bounds of output SLC in meters, optional.
+                # Defaults to entire fully focused swath.
+                start_range: null
+                end_range: null
+
+                # Output grid azimuth sample rate in Hz, optional.
+                # Defaults to input PRF.
+                output_prf: null
+
+                # Interval for azimuth grid alignment in seconds.
+                # The computed start_time (represented as the number of seconds
+                # since midnight) will be rounded to an integer multiple of this
+                # interval.  For the default value of null, the output pulse
+                # interval (1 / output_prf) is used.  When output_prf is an
+                # integer, this guarantees that adjacent scenes can be aligned
+                # in time with integer shifts.
+                # Irrelevant when start_time is not null.
+                time_snap_interval: null
+
+                # Interval for range grid alignment in meters.
+                # The computed start_range will be rounded to an integer
+                # multiple of this interval.  The default value is equal to
+                # c / 2 / fs_ref which guarantees for NISAR that adjacent
+                # scenes can be aligned in range with integer shifts since the
+                # sample rate for all NISAR modes is an integer multiple of
+                # fs_ref = 6 MHz.
+                # Irrelevant when start_range is not null.
+                range_snap_interval: 24.982704833333333
+
+            # Min amount of padding (in seconds) beyond raw data start and stop
+            # times to retain when cropping the orbit and attitude data.
+            ephemeris_crop_pad: 10.0
+
+            # Range spectral window, optional.  Defaults to no weighting.
+            range_window:
+                # Kaiser or Cosine
+                kind: Kaiser
+                # Shape parameter. For Kaiser, 0 <= shape < Inf.
+                # For Cosine, 0 <= shape <= 1
+                shape: 0.0
+
+            # Azimuth spectral window, optional.  Defaults to no weighting.
+            azimuth_window:
+                kind: Kaiser
+                shape: 0.0
+
+            # Elevation antenna pattern, optional.
+            elevation_antenna_pattern:
+                # Range spacing in meters of resampled antenna pattern grid
+                # Defaults to 5 MHz bandwidth.
+                # 5 MHz bandwidth has 6 MHz sample rate -> c / 2 / 6e6 spacing
+                spacing: 24.982704833333333
+
+            noise_equivalent_backscatter:
+                # supported noise estimator algorithms:
+                # - MEE:  Min Eigenvalue Estimator, Default.
+                # - MVE: Min Variance Estimator
+                algorithm: MEE
+                # Number of range blocks. This determines the size
+                # of noise power array as a function of slant range.
+                # If `fill_nan_ends=True`, the size will be
+                # `num_range_block+2`.
+                num_range_block: 80
+                # Percentage (in [0, 100]) of a range block that can be
+                # corrupted by data gaps before it is considered
+                # invalid and its noise power is set to NaN.
+                threshold_invalid_range_block: 10.0
+                # Fill NaN values due to TX gap and add two extra end points
+                # while making sure the product is uniform in slant range.
+                # Set to True for nominal science (recommended) and False
+                # for debugging.
+                fill_nan_ends: true
+                # number of range lines used as coherent processing interval
+                # only in MEE. It is recommended to use a value within
+                # [3, 20].
+                cpi: 10
+                # Median of  `cpi-1` eigenvalues rather than just min in MEE.
+                # Default is median (recommended).
+                median_ev: True
+                # Difference of noise-only range lines is used in only
+                # MVE (recommended)
+                diff: True
+                # The method in differentiating the noise-only range lines in
+                # only MVE. The supported methods are:
+                # - single: last range line will be subtracted from all.
+                # - mean: averaged over all lines will be subtracted from all.
+                # - diff: consecutive differences will be used in place of all.
+                diff_method: single
+
+            radio_frequency_interference:
+                # Whether to attempt RFI detection and record related metadata.
+                # Defaults to True
+                detection_enabled: True
+                # Whether to attemt RFI removal. Default to False.
+                # Requires that RFI detection is also enabled.
+                mitigation_enabled: False
+                # RFI detection algorithm. Supported values include:
+                #   - 'ST-EVD': slow-time eigenvalue decomposition algorithm
+                #   - 'FDNF': frequency domain notch filtering algorithm
+                #   - 'tone-rank': detects RFI in the spectral domain using
+                #     a lifted exponential statistical model.
+                # Defaults to 'ST-EVD'.
+                mitigation_algorithm: ST-EVD
+                # Number of range samples per range block when data blocking
+                # is applied in range direction for sample covariance matrix
+                # estimation. It is recommended that this parameter is at least 
+                # 5 x cpi_len to avoid discrepancy from true covariance matrix.
+                # In addition, in order to avoid a run-time error for ST-EVD,
+                # this parameter needs to be at least 2 x cpi
+                num_samples_rng_blk: 256
+                # Ignore any values passed in for parameter num_samples_rng_blk.
+                # Instead use all samples in the pulses for detection if this is true.
+                use_entire_pulse: False
+
+                slow_time_evd:
+                    # Coherent processing interval length (pulses).  Defaults to 32.
+                    cpi_length: 16
+                    # Maximum allowable number of emitters can be detected and
+                    # suppressed per CPI. ST-EVD would ignore emitters exceeding
+                    # this limit. This number should be less than cpi_length.
+                    # Defaults to 16.
+                    max_emitters: 4
+                    # Number of large value outliers to be trimmed in slow-time
+                    # minimum Eigenvalues.
+                    num_max_trim: 0
+                    # Number of small value outliers to be trimmed in slow-time
+                    # minimum Eigenvalues.
+                    num_min_trim: 0
+                    # A detection error (miss) happens when a maximum power RFI
+                    # emitter contaminates multiple consecutive CPIs, resulting in a
+                    # flat maximum Eigenvalue slope in slow time. Hence the standard
+                    # deviation (STD) of multiple dominant EVs across slow time
+                    # defined by this parameter are compared. The one with the
+                    # maximum STD is used for RFI Eigenvalue first difference
+                    # computation.
+                    max_num_rfi_ev: 2
+                    # Number of slow-time CPIs grouped together for determining and
+                    # applying a common EV slope threshold.
+                    num_cpi_per_threshold_block: 15
+                    # minimum fraction of samples required for cross-variance terms
+                    # of sample covariance matrix
+                    off_diag_overlap_ratio: 0.25
+                    # minimum fraction of samples required for covariance terms
+                    # of sample covariance matrix
+                    diag_valid_ratio: 0.20
+                    # This ratio will be used to determine the minimum number of valid Eigenvalues
+                    # required for a CPI. min_ev_valid_idx = int(np.round(min_rank_frac * cpi_len)) - 1
+                    min_rank_frac: 0.70
+                    # radar platform receiver dynamic range, e.g. 50 dB. This is applied as a threshold
+                    # to determine if the Eigenvalue under test is meaningfully signficant.
+                    rx_dynamic_range_db: 50.0
+                    # Parameters used to adaptively determine RFI eigenvalue
+                    # difference thresholds
+                    threshold_hyperparameters:
+                        # The computed sigma ratio of maximum and minimum Eigenvalue
+                        # first differences. It is a dimensionless figure of merit.
+                        # Larger value of x indicates higher likelihood of RFI
+                        # presence.
+                        x: [2.0, 20.0]
+                        # Estimated range of number of sigmas of the first
+                        # difference of minimum Eigenvalues across threshold block
+                        # as a function of input x, e.g., smaller x results in
+                        # larger value of y, therefore relaxing the final threshold.
+                        # The values of x outside of the defined range of y are
+                        # extrapolated.
+                        y: [5.0, 2.0]
+
+                freq_notch_filter:
+                    # If Frequency Domain Notch Filtering (FDNF) is applied, this parameter
+                    # defines the number of azimuth (slow-time) pulses of the input data to be 
+                    # processed at once or processing block azimuth dimension.
+                    # Defaults to 1
+                    num_pulses_az: 1000
+                    # Frequency Domain Notch Filtering (FDNF) slow-time averaging window 
+                    # size for Time-Stationary Narrowband (TSNB) RFI detection
+                    # This is a user-defined parameter
+                    az_winsize: 256
+                    # Frequency Domain Notch Filtering (FDNF) fast-time averaging window 
+                    # size for Time-Varying Wideband (TVWB) RFI detection
+                    rng_winsize: 100
+                    # If FDNF is applied, when data mean and standard deviations are 
+                    # computed, 'trim_frac/2' proportion of outliers will be removed from 
+                    # both tails of the distribution.
+                    trim_frac: 0.01
+                    # If FDNF is applied, a threshold for pvalue needs to be selected. 
+                    # pvalue is a measure of confidence against a null hypothesis. 
+                    # In FDNF: Null Hypothesis: NO RFI, Alternative Hypothesis: RFI present
+                    # If p-value of the range-frequency power spectra is less than p-value 
+                    # threshold, alternative hypothesis is accepted. Otherwise, null hypothesis 
+                    # is accepted.
+                    pvalue_threshold: 0.005
+                    # If FDNF is applied, the cumulative probability density function (CDF)
+                    # of the input Time Stationary Narrowband (TSNB) and Time Varying Wideband
+                    # (TVWB) masks will be compared with this threshold. It represents 
+                    # an estimate of RFI likelihood in the data. A small cdf_threshold value 
+                    # results in a high threshold for RFI detection and vice versa.
+                    cdf_threshold: 0.1
+                    # If FDNF is applied, this parameter controls narrowband RFI detection.
+                    # This should be enabled unless for the purpose of debugging.
+                    # Defaults to True
+                    nb_detect: True
+                    # If FDNF is applied, this parameter controls wideband RFI detection.
+                    # This should be enabled unless for the purpose of debugging.
+                    # Defaults to True
+                    wb_detect: True
+
+                tone_rank:
+                    # Processing block size [azimuth, range] in samples.
+                    block_dims: [512, 1024]
+                    # Target false positive rate for RFI detection, in (0, 1).
+                    # Lower values result in more conservative detection (fewer false
+                    # alarms but potentially missed RFI).
+                    nominal_false_positive_rate: 0.0005
+                    # Quantile in [1-bandwidth, 1) used to estimate the rate parameter
+                    # of the lifted exponential distribution. Default is 0.5 (median).
+                    reference_quantile: 0.5
+                    # Whether to attempt linear/nearest-neighbor interpolation
+                    # for RFI samples.  If False, RFI samples are replaced
+                    # directly with fill_value.
+                    interpolate: True
+                    # How to generate fallback values for RFI samples when
+                    # interpolation fails or is disabled.
+                    # "noise": use random Gaussian noise matched to estimated
+                    # signal level
+                    # "zero": fill with zeros
+                    fill_value: zero
+                    # Max portion of a row that can be masked by a TX gap before
+                    # its spectrum is considered invalid (0.0: any gap invalidates
+                    # row, 1.0: ignore gap mask).
+                    max_gap_fraction: 0.5
+
+            # Range filter parameters for mixed-mode cases.
+            range_common_band_filter:
+                # Stop-band attenuation in dB
+                attenuation: 40.0
+                # Transition width as a fraction of output bandwidth.
+                width: 0.15
+
+            # Radar-to-geographic coordinate transforms
+            rdr2geo:
+                # Allowable height error in m
+                tol_height: 1e-5
+                # Smallest possible look angle in degrees
+                look_min_deg: 0.0
+                # Largest possible look angle in degrees
+                look_max_deg: 90.0
+
+            # Geographic-to-radar coordinate transforms
+            geo2rdr:
+                # Allowable azimuth time error in s
+                tol_aztime: 1e-7
+                # Earliest time in search interval, in s past orbit reference
+                # epoch.  null for automatic selection
+                time_start: null
+                # Latest time in search interval, in s past orbit reference
+                # epoch.  null for automatic selection
+                time_end: null
+
+            # Calibration and processing information look-up tables (LUTs)
+            # excluding Doppler
+            lookup_tables:
+
+                # Downsampling factors with respect to the RSLC grid
+                downsampling_factor:
+                    # Downsampling factor in azimuth direction
+                    azimuth: 50
+                    # Downsampling factor in range direction
+                    range: 50
+
+                # Extra margin added to LUTs
+                margin_in_pixels:
+                    # Extra margin added to lookup table in azimuth, in pixels.
+                    azimuth: 11
+                    # Extra margin added to lookup table in range, in pixels.
+                    range: 11
+
+            doppler:
+                # Offset between quaternion frame and antenna boresight in degrees.
+                # TBD This will likely be parameter in a separate cal file.
+                azimuth_boresight_deg: 0.9
+
+                # How to interpolate between samples in the LUT.
+                interp_method: bilinear
+
+                # Postings for generated Doppler lookup table.
+                spacing:
+                    # Lookup table range spacing in m
+                    range: 2000.0
+                    # Lookup table Azimuth spacing in s
+                    azimuth: 1.0
+                
+                # Extra margin added to the Doppler LUT
+                margin_in_pixels:
+                    # Extra margin added to lookup table in azimuth, in pixels.
+                    azimuth: 11
+                    # Extra margin added to lookup table in range, in pixels.
+                    range: 11
+
+            # Settings for range compression algorithm.
+            rangecomp:
+                # Convolution output mode: {"valid", "full", "same"} (default: "full")
+                mode: full
+
+                # Range compression will always process the full pulse, so the
+                # range dimension will be ignored.
+                block_size:
+                    range: 0
+                    azimuth: 1024
+
+                notches: []
+
+            # Settings for azimuth compression algorithm.
+            azcomp:
+                # Azimuth compression can be tiled arbitrarily, though
+                # dimensions will affect runtime.
+                block_size:
+                    range: 32768
+                    azimuth: 1024
+
+                # Desired azimuth resolution in meters.
+                azimuth_resolution: 6.0
+
+                kernel:
+                    # Knab or NFFT
+                    type: Knab
+                    # Length = 1+2*halfWidth
+                    halfwidth: 4
+                    # Transform padding ratio for NFFT method.
+                    approx_oversample: 1.7
+
+                    fit: Table # null or Cheby or Table
+                    fit_order: 2048
+
+            dry_troposphere_model: tsx
+
+            dem:
+                # Height (in meters) to use if DEM unavailable.
+                reference_height: 0.0
+
+                # How to interpolate the digital elevation model.  One of
+                # nearest, bilinear, bicubic, biquintic, or sinc
+                interp_method: biquintic
+
+                # Whether workflow will terminate if DEM doesn't fully cover
+                # radar swath.
+                require_full_coverage: True # TODO: Apply margin to polygon
+
+            # EPSG code of the projection to use for the metdata cube.
+            metadata_cube_epsg: 4326
+
+            # Nominal antenna dimensions to use for BLU, EAP, etc. when no
+            # antenna pattern input file is provided or its contents are
+            # unsuitable. Each dimension has units of meters and is assumed
+            # 12.0 m if unspecified.
+            nominal_antenna_size:
+                range: 12.0
+                azimuth: 12.0
+
+            # Scale factor to apply to data before float16 encoding, optional.
+            # Default is 1.0.
+            # The largest representable float16 value is 65504.
+            # NOTE This is ad-hoc until the processor is radiometrically calibrated.
+            encoding_scale_factor: 1.0
+
+            # Whether to delete scratch files.  Default is True.
+            delete_tempfiles: True
+
+            # Dump height layer to temp file for debug purposes.  Default=False
+            debug_dump_height: False
+
+            # If true, fill transmit gaps with zeros to remove loop-back
+            # cal pulses.
+            zero_fill_gaps: True
+
+            valid_data_mask:
+                # Length in meters to divide the valid data polygon into before
+                # rasterization.  Ideally smaller than any changes in the
+                # location of the swath due to range timing updates.
+                polygon_segment_length: 50.0
+
+                # Number of pulses to ignore when calculating the valid data
+                # region at the end of a fixed-PRF observation.  This is
+                # relevant when a fixed-PRF observation is immediately followed
+                # by a dithered observation, as the dithered pulses in the air
+                # will overlap the last few receive windows of the fixed-PRF
+                # one.
+                num_ignore: 25
+
+                # Max allowed time (in seconds) between the last pulse of one
+                # observation and the first pulse of the following observation
+                # for the two to be considered seamless.  Larger raw data gaps
+                # may result in a synthetic aperture being marked invalid in the
+                # RSLC.
+                max_observation_gap: 0.002
+
+            caltone:
+                # If "azimuth_mean", subtract the azimuth mean from the raw
+                # data, which is useful when the caltone is nearly constant in
+                # azimuth but not stationary in range.  Calculating the mean
+                # and subtracting it is done in blocks using
+                # rangecomp.block_size
+                # If "wavelet" then subtract an estimate that varies in 2D.
+                # No correction when "disabled".
+                # Option "auto" means "wavelet" if dithered else "azimuth_mean",
+                # which is a sensible default for NISAR LSAR.
+                # auto | wavelet | azimuth_mean | disabled
+                algorithm: auto
+
+                # Calibration tone frequency (RF) in Hz.
+                # NOTE Caltone frequency changed for most modes between mode
+                # table v50 and v51, which went into operations on
+                # 2025-10-17T00:00:00Z.  The v50 frequency is 1216.904297e6 Hz
+                # while the v51 frequency is 1214.882813e6 Hz.
+                frequency: 1214.882813e6
+
+                # Length of constant-overlap add (COLA) window.
+                wavelet_size: 64
+
+            # Processing stage switches, mostly for debug.
+            # Any missing stages assumed True
+            is_enabled:
+                # azimuth resampling and gap-filling
+                presum_blu: True
+                # range compression
+                rangecomp: True
+                # elevation antenna pattern correction
+                eap: True
+                # R^4 spreading loss correction
+                range_cor: True
+                # azimuth compression
+                azcomp: True
+
+        output:
+            # Data type for image layers.  The pixel values are stored as pairs
+            # of floating point numbers corresponding to the real and imaginary
+            # parts of a complex number.  Valid choices are
+            # - complex32: pairs of 16-bit floats (half precision)
+            # - complex64: pairs of 32-bit floats (single precision)
+            # - complex64_zero_mantissa: pairs of 32-bit floats where the least
+            #       significant bits are zeroed out.  Useful when combined with
+            #       compression.
+            data_type: complex64_zero_mantissa
+
+            # Enable gzip compression of raster
+            compression_enabled: True
+
+            # HDF5 compression filter.  Typically gzip, lzf, or szip.
+            compression_type: gzip
+
+            # Level of compression applied to raster
+            compression_level: 4
+
+            # Chunk size of raster.  Enter [-1, -1] to disable chunks.
+            chunk_size: [512, 512]
+
+            # Enable shuffle filtering of raster
+            shuffle: True
+
+            # Number of stored bits retained in the mantissa of the floating
+            # point representation of each component (real/imaginary) of each
+            # complex sample.  Only relevant when
+            # data_type=complex64_zero_mantissa.
+            mantissa_nbits: 10
+
+            # HDF5 file space management strategy.  In our tests, the "page"
+            # strategy works well for accessing files stored on the cloud by
+            # reducing the number of high-latency REST API calls needed to read
+            # datasets and their metadata.
+            fs_strategy: page
+
+            # HDF5 file space page size in bytes.  Only relevant when
+            # fs_strategy="page".  Ideally at least large enough to hold
+            # `chunk_size` amount of uncompressed data as well as its metadata.
+            fs_page_size: 4194304
+
+        qa:
+
+            workflows:
+
+                # Flag to run `validate` workflow to validate the
+                # input file against its product spec.
+                # Default: True
+                validate: true
+
+                # Flag to run `qa_reports` workflow to generate a
+                # PDF report, geolocated browse image, compute statistics
+                # on the input file, etc..
+                # Default: True
+                qa_reports: true
+
+                # Flag to run Point Target Analyzer calibration tool.
+                # Default: True
+                point_target_analyzer: true
+
+                # Flag to run Absolute Radiometric Calibration calibration tool.
+                # Default: True
+                absolute_radiometric_calibration: true
+
+                # Flag to run Noise Equivalent Backscatter calibration tool.
+                # Default: True
+                noise_equivalent_backscatter: true
+
+            software_config:
+
+                # True to cache selected dataset(s) into intermediate
+                # memory-mapped flat file(s), which speeds up repeat access.
+                # False to always read data directly from the input file.
+                # Generally, enabling caching should reduce runtime.
+                # Default: True
+                use_cache: true
+
+                # True to delete the nested QA scratch directory in
+                # `scratch_path` and its contents when QA SAS is finished.
+                # Default: True
+                delete_qa_scratch_files: true
+
+            validation:
+
+                # True to raise an exception if one or more metadata LUTs
+                # contain all non-finite (e.g. Nan, +/- Inf) values, or if one or more
+                # z-dimension height layers in a 3D LUT ("metadata cube") has
+                # all non-finite values. False to quiet the exception (although
+                # it will still be logged).
+                # Default: True
+                metadata_luts_fail_if_all_nan: true
+
+            qa_reports:
+
+                backscatter_img:
+
+                    # True to compute backscatter in linear units when generating
+                    # the backscatter image for the browse images and graphical
+                    # summary PDF. False for decibel units.
+                    # Default: True
+                    linear_units: true
+
+                    # Number of looks along each axis of the Frequency A
+                    # image arrays for multilooking the backscatter image.
+                    # Format: [<num_rows>, <num_cols>]
+                    # Example: [6,7]
+                    # If not provided, the QA code to compute the nlooks values
+                    # based on `longest_side_max`.
+                    # Default: None
+                    nlooks_freqa:
+
+                    # Number of looks along each axis of the Frequency B
+                    # image arrays for multilooking the backscatter image.
+                    # Format: [<num_rows>, <num_cols>]
+                    # Example: [6,7]
+                    # If not provided, the QA code to compute the nlooks values
+                    # based on `longest_side_max`.
+                    # Default: None
+                    nlooks_freqb:
+
+                    # The maximum number of pixels allowed for the longest side
+                    # of the final 2D multilooked browse image. Defaults to 2048.
+                    # If `nlooks_freq*` parameter(s) is not None, nlooks
+                    # values will take precedence.
+                    # Default: 2048
+                    longest_side_max: 2048
+
+                    # Percentile range that the image array will be clipped to
+                    # and that the colormap covers. Must be in range [0.0, 100.0].
+                    # Default: (5.0, 95.0)
+                    percentile_for_clipping: [5.0, 95.0]
+
+                    # Gamma correction parameter applied to backscatter and browse image(s).
+                    # Gamma will be applied as follows:
+                    # array_out = normalized_array ^ gamma
+                    # where normalized_array is a copy of the image with values
+                    # scaled to the range [0,1].
+                    # The image colorbar will be defined with respect to the input
+                    # image values prior to normalization and gamma correction.
+                    # If None, then no normalization and no gamma correction will be applied.
+                    # Default: 0.5
+                    gamma: 0.5
+
+                    # Color to plot NaN pixels for the PDF report.
+                    # For transparent, set to None.
+                    # The color should given in a format recognized by matplotlib:
+                    # https://matplotlib.org/stable/users/explain/colors/colors.html
+                    # (Note: Browse image PNG will always plot NaN as transparent.)
+                    # Default: blue
+                    nan_color_in_pdf: blue
+
+                    # User-preferred tile shape for processing images by batches.
+                    # Actual tile shape may be modified by QA to be an integer
+                    # multiple of the number of looks for multilooking, of the
+                    # decimation ratio, etc.
+                    # Format: [<num_rows>, <num_cols>]
+                    # -1 to indicate all rows / all columns (respectively).
+                    # Default: (1024, 1024)
+                    tile_shape: [1024, 1024]
+
+                    # True to output one grayscale PNG+KML pair per raster image layer
+                    # using the native coordinate system; these will be generated
+                    # in addition to the standard native browse image PNG+KML.
+                    # The filename of each additional file will include a suffix noting
+                    # that image's frequency and polarization.
+                    # False to have the standard native browse image be the only PNG+KML generated.
+                    # Note: If True, and if the input granule contains only one image,
+                    # then the additional individual PNG will be a duplicate image to the
+                    # native browse image PNG, but with more descriptive filename.
+                    # Default: False
+                    output_individual_pngs: false
+
+                browse_latlon:
+
+                    # True to generate a version of the native browse PNG+KML that is
+                    # projected to EPSG 4326 (lon/lat) coordinate system for accurate
+                    # geolocation in GIS software.
+                    # False to only generate native browse outputs.
+                    # The EPSG 4326 PNG+KML version will be in addition to the native
+                    # browse PNG+KML outputs (where the PNG reflects the input product's
+                    # native coordinate system). The EPSG 4326 outputs will be suffixed with
+                    # '_LATLON' (e.g., 'BROWSE_LATLON.png' and 'BROWSE_LATLON.kml').
+                    # Default: False
+                    output_browse_latlon: false
+
+                    # Resampling method for ISCE3 geocoding. Options: 'sinc',
+                    # 'bilinear', 'bicubic', 'nearest', 'biquintic'.
+                    # Ignored if `output_browse_latlon` is False.
+                    # When output browse image data contains phase discontinuities
+                    # (e.g. RIFG's wrapped interferogram), strongly recommend 'nearest';
+                    # other methods can create artifacts when interpolating across the jump.
+                    # Default: bilinear
+                    resample: bilinear
+
+                histogram:
+
+                    # Step size to decimate the input array for computing
+                    # the backscatter and phase histograms.
+                    # For example, [2,3] means every 2nd azimuth line and
+                    # every 3rd range sample will be used to compute the histograms.
+                    # Format: [<azimuth>, <range>]
+                    # Default: (8, 8)
+                    decimation_ratio: [8, 8]
+
+                    # Range in dB for the backscatter histogram's bin edges. Endpoint will
+                    # be included. Format: [<starting value>, <endpoint>]
+                    # Default: (-80.0, 20.0)
+                    backscatter_histogram_bin_edges_range: [-80.0, 20.0]
+
+                    # The range for the phase histograms' y-axis.
+                    # Format: [<min of range>, <max of range>]
+                    # Examples: None, [0.0, None], [None, 0.7], [-0.2, 1.2], [None, None]
+                    # If the min or max is set to None, then that limit is set dynamically
+                    # based on the range of phase histogram density values.
+                    # If None, this is equivalent to [None, None].
+                    # Default: (0.0, 0.5)
+                    phase_histogram_y_axis_range: [0.0, 0.5]
+
+                    # True to compute phase histogram in radians units,
+                    # False for degrees units.
+                    # Note: If False, suggest adjusting `phase_histogram_y_axis_range`
+                    # appropriately for degrees rather than radians.
+                    # Default: True
+                    phs_in_radians: true
+
+                    # User-preferred tile shape for processing images by batches.
+                    # Actual tile shape may be modified by QA to be an integer
+                    # multiple of the number of looks for multilooking, of the
+                    # decimation ratio, etc.
+                    # Format: [<num_rows>, <num_cols>]
+                    # -1 to indicate all rows / all columns (respectively).
+                    # Default: (1024, -1)
+                    tile_shape: [1024, -1]
+
+                range_spectra:
+
+                    # The stride to decimate the input array along the azimuth axis.
+                    # For example, `4` means every 4th range line will
+                    # be used to compute the range spectra. Must be greater than zero.
+                    # If `1`, no decimation will occur (but is slower to compute).
+                    # Default: 8
+                    az_decimation: 8
+
+                    # True if the input frequencies are in Hz,
+                    # but output should be converted to MHz.
+                    # Default: True
+                    hz_to_mhz: true
+
+                    # User-preferred tile height (number of range lines) for processing
+                    # images by batches. Actual tile shape may be modified by QA to be
+                    # an integer multiple of `az_decimation`. -1 to use all rows.
+                    # Note: full rows must be read in, so the number of columns for each tile
+                    # will be fixed to the number of columns in the input raster.
+                    # Default: 512
+                    tile_height: 512
+
+                azimuth_spectra:
+
+                    # Azimuth spectra will be computed by averaging `num_columns` contiguous
+                    # range samples for each of near-, mid-, and far-range subswaths.
+                    # If `num_columns` is -1 or greater than the number of range samples,
+                    # it will be set to the number of range samples.
+                    # Default: 1024
+                    num_columns: 1024
+
+                    # True if the input frequencies are in Hz,
+                    # but output should be converted to MHz.
+                    # Default: False
+                    hz_to_mhz: false
+
+                    # Tile width (number of columns) for processing
+                    # each subswath by batches. -1 to set this to `num_columns`.
+                    # Note: full columns must be read in, so the number of rows for each tile
+                    # will be fixed to the height of the input raster.
+                    # Default: 256
+                    tile_width: 256
+
+            point_target_analyzer:
+
+                # The width, in samples, of the square block of image data
+                # centered around the target position to extract for oversampling
+                # and peak finding. Must be >= 1.
+                # Default: 64
+                nchip: 64
+
+                # The upsampling ratio. Must be >= 1.
+                # Default: 32
+                upsample_factor: 32
+
+                # Option controlling how the target peak position is
+                # estimated. Valid options are 'time' or 'frequency'.
+
+                # 'time':
+                # The peak location is found in the time domain by detecting the
+                # maximum value within a square block of image data around the
+                # expected target location. The signal data is upsampled to
+                # improve precision.
+
+                # 'frequency':
+                # The peak location is found by estimating the phase ramp in the
+                # frequency domain. This mode is useful when the target is
+                # well-focused, has high SNR, and is the only target in the
+                # neighborhood (often the case in point target simulations).
+                # Default: time
+                peak_find_domain: time
+
+                # The number of sidelobes, including the main lobe, to
+                # use for computing the integrated sidelobe ratio (ISLR).
+                # Must be > 1.
+                # Default: 10
+                num_sidelobes: 10
+
+                # Controls how the main lobe null locations are
+                # determined for ISLR computation. If `predict_null` is true, the
+                # null locations are determined analytically by assuming that the
+                # corner reflector has the impulse response of a point target with
+                # known sampling-rate-to-bandwidth ratio (given by `fs_bw_ratio`)
+                # and range & azimuth spectral windows (given by `window_type` &
+                # `window_parameter`). In this case, the first sidelobe will be
+                # considered to be part of the main lobe. Alternatively, if
+                # `predict_null` is false, the apparent null locations will be
+                # estimated from the RSLC image data by searching for nulls in
+                # range & azimuth cuts centered on the target location. In this
+                # case, the main lobe does *not* include the first sidelobe.
+                # `predict_null` has no effect on peak-to-sidelobe ratio (PSLR)
+                # computation -- for PSLR analysis, the null locations are always
+                # determined by searching for nulls in the RSLC data.
+                # Default: False
+                predict_null: false
+
+                # The ratio of sampling rate to bandwidth in the RSLC
+                # image data. Must be the same for both range & azimuth. It is
+                # ignored if `predict_null` was false. Must be > 0.
+                # Default: 1.2
+                fs_bw_ratio: 1.2
+
+                # The window type used in RSLC formation. Used to predict
+                # the locations of main lobe nulls during ISLR processing if
+                # `predict_null` was true. It is ignored if `predict_null` was
+                # false. The same window type is assumed to have been used for
+                # both range & azimuth focusing. Valid options are 'rect',
+                # 'cosine', or 'kaiser'.
+
+                # 'rect':
+                # Assumes that the RSLC image was formed using a
+                # rectangular-shaped window (i.e. no spectral weighting was
+                # applied).
+
+                # 'cosine':
+                # Assumes that the RSLC image was formed using a raised-cosine
+                # window with pedestal height defined by `window_parameter`.
+
+                # 'kaiser':
+                # Assumes that the RSLC image was formed using a Kaiser window
+                # with beta parameter defined by `window_parameter`.
+                # Default: rect
+                window_type: rect
+
+                # The window shape parameter used in RSLC formation. The
+                # meaning of this parameter depends on the `window_type`. For a
+                # raised-cosine window, it is the pedestal height of the window
+                # and must be in the interval [0, 1]. For a Kaiser window, it is
+                # the beta parameter and must be >= 0. It is ignored if
+                # `window_type` was 'rect' or if `predict_null` was false. The
+                # same shape parameter is assumed to have been used for both range
+                # & azimuth focusing.
+                # Default: 0.0
+                window_parameter: 0.0
+
+            absolute_radiometric_calibration:
+
+                # The width, in samples, of the square block of image data
+                # centered around the target position to extract for oversampling
+                # and peak finding. Must be >= 1.
+                # Default: 64
+                nchip: 64
+
+                # The upsampling ratio. Must be >= 1.
+                # Default: 32
+                upsample_factor: 32
+
+                # Option controlling how the target peak position is
+                # estimated. Valid options are 'time' or 'freq'.
+
+                # 'time':
+                # The peak location is found in the time domain by detecting the
+                # maximum value within a square block of image data around the
+                # expected target location. The signal data is upsampled to
+                # improve precision.
+
+                # 'freq':
+                # The peak location is found by estimating the phase ramp in the
+                # frequency domain. This mode is useful when the target is
+                # well-focused, has high SNR, and is the only target in the
+                # neighborhood (often the case in point target simulations).
+                # Default: time
+                peak_find_domain: time
+
+                # The width, in *oversampled* samples, of the square
+                # sub-block of image data centered around the target position to
+                # extract for fitting a quadratic polynomial to the peak. Note
+                # that this is the size in samples *after upsampling*.
+                # Must be >= 3.
+                # Default: 5
+                nfit: 5
+
+                # Method to use for estimating the target signal power.
+                # Valid options are 'box' or 'integrated'.
+
+                # 'box':
+                # Measures power using the rectangular box method, which assumes
+                # that the target response can be approximated by a 2-D
+                # rectangular function. The total power is estimated by
+                # multiplying the peak power by the 3dB response widths in
+                # along-track and cross-track directions.
+
+                # 'integrated':
+                # Measures power using the integrated power method. The total
+                # power is measured by summing the power of bins whose power
+                # exceeds a predefined minimum power threshold.
+                # Default: box
+                power_method: box
+
+                # The minimum power threshold, measured in dB below the
+                # peak power, for estimating the target signal power using the
+                # integrated power method. This parameter is ignored if
+                # `power_method` is not 'integrated'.
+                # Default: 3.0
+                power_threshold: 3.0
