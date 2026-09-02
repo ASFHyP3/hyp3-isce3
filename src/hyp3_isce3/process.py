@@ -193,13 +193,10 @@ def get_gcov_config(
             if 'product_path_group:' in line:
                 break
 
-    # Our shipped schema is the header (input/ancillary file groups) with
-    # placeholder tokens standing in for the real scene/orbit/ancillary paths.
-    yaml_schema = Path(hyp3_isce3.__file__).parent / 'schemas' / 'focus.yaml'
-    with yaml_schema.open('r') as f:
+    with template_yaml.open('r') as f:
         lines = f.readlines()
 
-    yaml_file = Path('focus.yaml')
+    yaml_file = Path('gcov.yaml')
     with yaml_file.open('w') as out:
         for line in lines:
             newstring = ''
@@ -678,7 +675,7 @@ def process_isce3_gcov(reference_scene: str) -> Path:
     scene_polygon, epsg_code = get_scene_polygon(reference_path, subset=None)
     dem_path = get_dem(scene_polygon, epsg_code)
 
-    template_yaml = Path(__file__).parent / 'schemas/focus.yaml'
+    template_yaml = Path(__file__).parent / 'schemas/gcov.yaml'
 
     yaml_path = get_gcov_config(
         reference_path,
@@ -698,7 +695,7 @@ def process_isce3_gcov(reference_scene: str) -> Path:
         yaml_path,
     ])
 
-    output = Path('slc.h5')
+    output = Path('gcov.h5')
     if not output.exists():
         raise RuntimeError('The RSLC file was not written!')
 
