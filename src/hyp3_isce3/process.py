@@ -146,6 +146,11 @@ def download_yaml(reference_path: str) -> Path:
     short_name = 'NISAR_L2_GUNW_BETA_V1'
     keyword = '_'.join(reference_path.split('_')[4:8])
     results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
+    if len(results) == 0:
+        short_name_prov = 'NISAR_L2_GUNW_PROVISIONAL_V1'
+        results = earthaccess.search_data(short_name=short_name_prov, granule_name=f'*{keyword}*')
+        if len(results) == 0:
+            raise ValueError(f'No {short_name} or {short_name_prov} granule found for {keyword}')
     gunw = results[0].data_links()[0].split('/')[-2]
     res = asf.granule_search(gunw)
     yaml_url = res.find_urls(pattern=r'.yaml')[0]
