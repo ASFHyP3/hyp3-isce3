@@ -102,7 +102,7 @@ disable_error_code = ["import-untyped"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
 
 [tool.pixi.pypi-options]
 no-build-isolation = ['isce3']
@@ -128,7 +128,7 @@ numpy = "<2.4"
 opencv = "*"
 pandas = ">=1.4,<3.0"
 pyaps3="*"
-pydap="*"
+pydap="<3.5.11"
 pygrib="*"
 pyproj = ">=3.3"
 python-dateutil = "*"
@@ -150,6 +150,7 @@ pybind11 = "*"
 rioxarray="*"
 ruamel = "*"
 "ruamel.yaml" = "*"
+whirlwind-insar = "*"
 yamale = "*"
 backoff = "*"
 pysolid = "*"
@@ -160,9 +161,6 @@ pixi-pycharm = ">=0.0.8,<0.0.9"
 [tool.pixi.target.linux-64.dependencies]
 pyre = "*"
 
-[tool.pixi.target.linux-aarch64.pypi-dependencies]
-pyre = "*"
-
 [tool.pixi.target.osx-64.dependencies]
 pyre = "*"
 
@@ -171,7 +169,7 @@ pyre = "*"
 
 [tool.pixi.pypi-dependencies]
 snaphu = "*"
-raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3"}
+raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3" }
 
 [tool.pixi.feature.pycharm.dependencies]
 pixi-pycharm = "*"
@@ -198,7 +196,7 @@ cmd = [
     "-m",
     "pip",
     "install",
-    "git+https://github.com/isce-framework/isce3.git@bd58fcd3dad94f7f06871f927b902eca20680439"
+    "git+https://github.com/isce-framework/isce3.git@release-v0.25"
 ]
 depends-on = []
 

@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import yamale
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -144,7 +145,7 @@ def download_yaml(reference_path: str) -> Path:
         tmp_path: Path of the yaml file.
     """
     short_name = 'NISAR_L2_GUNW_BETA_V1'
-    keyword = '_'.join(reference_path.split('_')[4:8])
+    keyword = '_'.join(reference_path.split('_')[5:8])
     results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
     if len(results) == 0:
         short_name_prov = 'NISAR_L2_GUNW_PROVISIONAL_V1'
@@ -451,7 +452,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
 
     args = argparse.Namespace(run_config_path=str(yaml_path), log_file=False)
     insar_runcfg = InsarRunConfig(args)
-
+    
     run_steps = {
         'bandpass_insar': True,
         'rdr2geo': True,
