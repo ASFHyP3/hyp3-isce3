@@ -19,6 +19,9 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           activate-environment: true
+        env:
+          SKBUILD_STRICT_CONFIG: "0"
+          CMAKE_ARGS: "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types"
 
       - name: ruff check
         run: |
@@ -40,6 +43,9 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           activate-environment: true
+        env:
+          SKBUILD_STRICT_CONFIG: "0"
+          CMAKE_ARGS: "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types"
 
       - name: Run pixi install task
         run: |
