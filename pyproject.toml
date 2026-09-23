@@ -102,7 +102,7 @@ disable_error_code = ["import-untyped"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-64", "osx-arm64"]
+platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
 
 [tool.pixi.pypi-options]
 no-build-isolation = ['isce3']
@@ -158,6 +158,9 @@ pixi-pycharm = ">=0.0.8,<0.0.9"
 
 
 [tool.pixi.target.linux-64.dependencies]
+pyre = "*"
+
+[tool.pixi.target.linux-aarch64.pypi-dependencies]
 pyre = "*"
 
 [tool.pixi.target.osx-64.dependencies]
