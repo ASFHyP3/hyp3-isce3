@@ -170,8 +170,8 @@ pyre = "*"
 pyre = "*"
 
 [tool.pixi.pypi-dependencies]
-raider = "<=0.5.3"
 whirlwind-insar = ">=0.10.0"
+raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3"}
 
 [tool.pixi.feature.pycharm.dependencies]
 pixi-pycharm = "*"
