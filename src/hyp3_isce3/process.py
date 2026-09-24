@@ -3,7 +3,7 @@
 import argparse
 import logging
 import zipfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asf_search as asf
@@ -144,8 +144,13 @@ def download_yaml(reference_path: str) -> Path:
         tmp_path: Path of the yaml file.
     """
     short_name = 'NISAR_L2_GUNW_BETA_V1'
-    keyword = '_'.join(reference_path.split('_')[4:8])
+    keyword = '_'.join(reference_path.split('_')[5:8])
     results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
+    if len(results) == 0:
+        short_name_prov = 'NISAR_L2_GUNW_PROVISIONAL_V1'
+        results = earthaccess.search_data(short_name=short_name_prov, granule_name=f'*{keyword}*')
+        if len(results) == 0:
+            raise ValueError(f'No {short_name} or {short_name_prov} granule found for {keyword}')
     gunw = results[0].data_links()[0].split('/')[-2]
     res = asf.granule_search(gunw)
     yaml_url = res.find_urls(pattern=r'.yaml')[0]
@@ -187,8 +192,8 @@ def get_orbit(scene_name: str) -> str:
         orbit_path: Path of the orbit file.
     """
     short_name = 'NISAR_OE'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
     temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
     results = earthaccess.search_data(short_name=short_name, granule_name='*POE*', temporal=temporal)
     if len(results) == 0:
@@ -214,8 +219,8 @@ def get_tropo(scene_name: str) -> str:
         tropo_path: Path of the file.
     """
     short_name = 'ASF_ECMWF_TROP'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    day = datetime(start_date.year, start_date.month, start_date.day)
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    day = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
     if start_date.hour % 6 < 3:
         tropo_date = day + timedelta(hours=int(start_date.hour / 6) * 6)
     else:
@@ -239,8 +244,8 @@ def get_tec(scene_name: str) -> str:
         tropo_path: Path of the file.
     """
     short_name = 'NISAR_TEC'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
     temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
     results = earthaccess.search_data(short_name=short_name, temporal=temporal)
     files = sorted(earthaccess.download(results))
