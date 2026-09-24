@@ -16,7 +16,7 @@ from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import ogr, osr
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import geocode_subset_box
+from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
 
 
 asf.constants.INTERNAL.CMR_TIMEOUT = 90
@@ -410,7 +410,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     tec_path = get_tec(reference_scene)
 
     scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
-    _ = get_dem(scene_polygon, epsg_code)
+    dem_path = get_dem(scene_polygon, epsg_code)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # crossmul looks the crop aligns to; download once and reuse for both.
@@ -424,7 +424,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
         # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
         # decorrelated areas).
         subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
-        _, _ = get_crossmul_looks(template_yaml)
+        az_looks, rg_looks = get_crossmul_looks(template_yaml)
         # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.
         reference_path = crop_streamed(
