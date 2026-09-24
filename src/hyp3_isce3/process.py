@@ -2,9 +2,8 @@
 
 import argparse
 import logging
-import yamale
 import zipfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asf_search as asf
@@ -17,7 +16,7 @@ from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import ogr, osr
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
+from hyp3_isce3.crop_rslc import geocode_subset_box
 
 
 asf.constants.INTERNAL.CMR_TIMEOUT = 90
@@ -193,8 +192,8 @@ def get_orbit(scene_name: str) -> str:
         orbit_path: Path of the orbit file.
     """
     short_name = 'NISAR_OE'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
     temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
     results = earthaccess.search_data(short_name=short_name, granule_name='*POE*', temporal=temporal)
     if len(results) == 0:
@@ -220,8 +219,8 @@ def get_tropo(scene_name: str) -> str:
         tropo_path: Path of the file.
     """
     short_name = 'ASF_ECMWF_TROP'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    day = datetime(start_date.year, start_date.month, start_date.day)
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    day = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
     if start_date.hour % 6 < 3:
         tropo_date = day + timedelta(hours=int(start_date.hour / 6) * 6)
     else:
@@ -245,8 +244,8 @@ def get_tec(scene_name: str) -> str:
         tropo_path: Path of the file.
     """
     short_name = 'NISAR_TEC'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
     temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
     results = earthaccess.search_data(short_name=short_name, temporal=temporal)
     files = sorted(earthaccess.download(results))
@@ -411,7 +410,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     tec_path = get_tec(reference_scene)
 
     scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
-    dem_path = get_dem(scene_polygon, epsg_code)
+    _ = get_dem(scene_polygon, epsg_code)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # crossmul looks the crop aligns to; download once and reuse for both.
@@ -425,7 +424,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
         # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
         # decorrelated areas).
         subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
-        az_looks, rg_looks = get_crossmul_looks(template_yaml)
+        _, _ = get_crossmul_looks(template_yaml)
         # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.
         reference_path = crop_streamed(
@@ -452,7 +451,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
 
     args = argparse.Namespace(run_config_path=str(yaml_path), log_file=False)
     insar_runcfg = InsarRunConfig(args)
-    
+
     run_steps = {
         'bandpass_insar': True,
         'rdr2geo': True,
