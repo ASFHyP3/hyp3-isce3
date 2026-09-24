@@ -170,8 +170,8 @@ pyre = "*"
 pyre = "*"
 
 [tool.pixi.pypi-dependencies]
-snaphu = "*"
-raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3" }
+raider = "<=0.5.3"
+whirlwind-insar = ">=0.10.0"
 
 [tool.pixi.feature.pycharm.dependencies]
 pixi-pycharm = "*"
@@ -192,15 +192,19 @@ py313 = { features = ["develop", "py313"]}
 py314 = { features = ["develop", "py314"], solve-group = "default"}
 
 
+[tool.pixi.tasks.install-snaphu]
+cmd = "pip install snaphu --no-cache-dir"
+env = { SKBUILD_STRICT_CONFIG = "0", CMAKE_ARGS = "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types" }
+
 [tool.pixi.tasks.install-isce3]
 cmd = [
     "python",
     "-m",
     "pip",
     "install",
-    "git+https://github.com/isce-framework/isce3.git@release-v0.25"
+    "git+https://github.com/isce-framework/isce3.git@4d2e5f43e6e873972e59a21123f917d1d5dc794a"
 ]
-depends-on = []
+depends-on = ["install-snaphu"]
 
 [tool.pixi.tasks.install-editable]
 cmd = [
