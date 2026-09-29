@@ -2,7 +2,7 @@ name: isce3
 channels:
   - conda-forge
 dependencies:
-  - gdal==3.11.0
+  - gdal
   - isce3-cuda
   - libgdal-hdf5
   - libgdal-netcdf
@@ -15,16 +15,14 @@ dependencies:
     - aioitertools==0.13.0
     - aiosignal==1.4.0
     - asf_search==12.3.1
-    - boto3==1.43.74
-    - botocore==1.43.74
+    - boto3
+    - botocore
     - bounded-pool-executor==0.0.3
     - cftime==1.6.5
     - dateparser==1.4.2
     - earthaccess==0.18.0
     - frozenlist==1.8.0
     - fsspec==2026.7.0
-    - hyp3_isce3==0.2.1.dev43+g6db5336d6.d20260819
-    - hyp3lib==4.0.1
     - importlib_resources==7.1.0
     - jmespath==1.1.0
     - lxml==6.1.2
@@ -47,5 +45,3 @@ dependencies:
     - utm==0.9.0
     - wrapt==2.3.0
     - yarl==1.24.5
-
-prefix: "/media/andrew/fast/miniforge3/envs/isce3"
