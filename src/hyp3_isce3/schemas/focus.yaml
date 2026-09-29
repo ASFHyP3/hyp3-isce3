@@ -420,7 +420,7 @@ runconfig:
                 # range dimension will be ignored.
                 block_size:
                     range: 0
-                    azimuth: 1024
+                    azimuth: 4096
 
                 notches: []
 
@@ -430,7 +430,7 @@ runconfig:
                 # dimensions will affect runtime.
                 block_size:
                     range: 32768
-                    azimuth: 1024
+                    azimuth: 4096
 
                 # Desired azimuth resolution in meters.
                 azimuth_resolution: 6.0

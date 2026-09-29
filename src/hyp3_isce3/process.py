@@ -198,7 +198,9 @@ def get_focus_config(
                 elif 'external_calibration' in line:
                     newstring += line.replace('null', paths['external_calibration'])
                 elif 'corner_reflector_file' in line:
-                    newstring += line.replace('null', paths['corner_reflectors'])    
+                    newstring += line.replace('null', paths['corner_reflectors'])
+                elif 'eap:' in line:
+                    newstring += line.replace('False', 'True')
                 else:
                     newstring = line        
             # TODO: Do we need to worry about getting orbit information? What will be available?
