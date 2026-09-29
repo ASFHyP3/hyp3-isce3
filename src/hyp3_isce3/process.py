@@ -29,6 +29,12 @@ asf.constants.INTERNAL.CMR_TIMEOUT = 90
 log = logging.getLogger(__name__)
 
 
+ANTENNA_PATTERN_CORRECTION = 'https://nisar.asf.earthdatacloud.nasa.gov/NISAR/ANTPAT/NISAR_ANTPAT_20231129T093104_01/NISAR_ANTPAT_20231129T093104_01.h5'
+CORNER_REFLECTOR = 'https://nisar.asf.earthdatacloud.nasa.gov/NISAR/CORNER_REFL/NISAR_ANC_CORNER_REFLECTORS_007/NISAR_ANC_CORNER_REFLECTORS_007.csv'
+INTERNAL_CALIBRATION = 'https://nisar.asf.earthdatacloud.nasa.gov/NISAR/LSAR_INT_CAL/NISAR_LSAR_INT_CAL_20250730T000000_01/NISAR_LSAR_INT_CAL_20250730T000000_01.h5'
+EXTERNAL_CALIBRATION = 'https://nisar.asf.earthdatacloud.nasa.gov/NISAR/LSAR_EXT_CAL/NISAR_LSAR_EXT_CAL_20250730T000000_02/NISAR_LSAR_EXT_CAL_20250730T000000_02.yaml'
+
+
 def get_insar_config(
     reference_path: str,
     secondary_path: str,
@@ -120,10 +126,31 @@ def get_insar_config(
     return Path('insar.yaml')
 
 
+# TODO: Will there be new versions of these files regularly?
+def get_anc_files(
+    antenna_pattern_url: str = ANTENNA_PATTERN_CORRECTION,
+    corner_reflector_url: str = CORNER_REFLECTOR,
+    internal_calibration_url: str = INTERNAL_CALIBRATION,
+    external_calibration_url: str = EXTERNAL_CALIBRATION,
+):
+    anc_file_urls = {
+        'antenna_pattern': antenna_pattern_url,
+        'corner_reflectors': corner_reflector_url,
+        'int_cal': internal_calibration_url,
+        'ext_cal': external_calibration_url,
+    }
+    paths = {}
+    for name, url in anc_file_urls.items():
+        subprocess.run(['wget', url])
+        paths[name] = url.split('/')[-1]
+    return paths
+
+
 def get_focus_config(
     reference_path: str,
     dem_path: str,
     template_yaml: Path,
+    retrieve_anc_files: bool = True,
 ) -> Path:
     """Create a configuration file for isce3.
 
@@ -137,6 +164,10 @@ def get_focus_config(
     Returns:
         yaml_file: Path of the configuration file.
     """
+    if retrieve_anc_files:
+        # TODO: Do we need to dynamically determine the necessary files for this?
+        paths = get_anc_files()
+
     # Keep the downloaded runconfig's tail (product_path_group on) and splice our
     # schema header in front. The caller owns template_yaml, so we don't delete it.
     with Path(template_yaml).open('r') as f:
@@ -159,8 +190,18 @@ def get_focus_config(
                 newstring += line.replace('reference_scene', reference_path)
             elif 'dem_for_scene' in line:
                 newstring += line.replace('dem_for_scene', dem_path)
-            # elif 'reference_orbit' in line:
-            #     newstring += line.replace('ref_orbit', reference_orbit) TODO: What orbit will we actually use? Maybe the one that is in the file.
+            elif paths:
+                if 'antenna_pattern' in line:
+                    newstring += line.replace('null', paths['antenna_pattern'])
+                elif 'internal_calibration' in line:
+                    newstring += line.replace('null', paths['internal_calibration'])
+                elif 'external_calibration' in line:
+                    newstring += line.replace('null', paths['external_calibration'])
+                elif 'corner_reflector_file' in line:
+                    newstring += line.replace('null', paths['corner_reflectors'])    
+                else:
+                    newstring = line        
+            # TODO: Do we need to worry about getting orbit information? What will be available?
             else:
                 newstring = line
             out.write(newstring)
@@ -614,7 +655,7 @@ def process_isce3_focus(reference_scene: str) -> Path:
     # product_id = get_product_id(reference_scene)
 
     # TODO: Download image
-    reference_path = reference_scene
+    reference_path = download_rslc(granule_name=reference_scene)
 
     # TODO: Should we use an external orbit, or the included one?
     # reference_orbit = get_orbit(reference_scene)
