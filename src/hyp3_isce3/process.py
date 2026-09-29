@@ -194,9 +194,9 @@ def get_focus_config(
                 if 'antenna_pattern' in line:
                     newstring += line.replace('null', paths['antenna_pattern'])
                 elif 'internal_calibration' in line:
-                    newstring += line.replace('null', paths['internal_calibration'])
+                    newstring += line.replace('null', paths['int_cal'])
                 elif 'external_calibration' in line:
-                    newstring += line.replace('null', paths['external_calibration'])
+                    newstring += line.replace('null', paths['ext_cal'])
                 elif 'corner_reflector_file' in line:
                     newstring += line.replace('null', paths['corner_reflectors'])
                 elif 'eap:' in line:
