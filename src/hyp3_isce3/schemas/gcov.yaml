@@ -333,7 +333,7 @@ runconfig:
                 # - "geogrid_and_radargrid": Enables full block-wise
                 # processing over both geogrid and radar grid; the SLC is
                 # loaded in segments per geogrid block.
-                memory_mode: auto
+                memory_mode: geogrid_and_radargrid
 
                 # Processing upsampling factor applied to input geogrid
                 geogrid_upsampling: 1
@@ -448,7 +448,7 @@ runconfig:
                     x_abs:
 
                 # Minimum block size in MB per thread
-                min_block_size:
+                min_block_size: 
 
                 # Maximum block size in MB per thread
                 max_block_size:
