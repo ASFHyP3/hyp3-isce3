@@ -3,17 +3,16 @@
 import argparse
 import logging
 import zipfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asf_search as asf
 import earthaccess
 import utm
 import yaml
-from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
-from osgeo import ogr, osr
+from osgeo import gdal, ogr, osr
 
 import hyp3_isce3
 from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
@@ -32,6 +31,7 @@ def get_config(
     secondary_orbit: str,
     reference_tropo: str,
     secondary_tropo: str,
+    dem_path: str,
     tec_path: str,
     watermask: str,
     template_yaml: Path,
@@ -47,6 +47,7 @@ def get_config(
         secondary_orbit: Path of the secondary orbit.
         reference_tropo: Path of the ECMWF file for the reference scene.
         secondary_tropo: Path of the ECMWF file for the secondary scene.
+        dem_path: Path to DEM file.
         tec_path: Path of the TEC file for the reference scene.
         watermask: Path of the water mask file.
         template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`) used as the tail/template.
@@ -86,6 +87,8 @@ def get_config(
                 newstring += line.replace('ref_tropo', reference_tropo)
             elif 'secondary_tropo' in line:
                 newstring += line.replace('sec_tropo', secondary_tropo)
+            elif 'dem_file' in line:
+                newstring += line.replace('dem_path', dem_path)
             elif 'tec_file' in line:
                 newstring += line.replace('tec_path', tec_path)
             elif 'watermask' in line:
@@ -144,8 +147,13 @@ def download_yaml(reference_path: str) -> Path:
         tmp_path: Path of the yaml file.
     """
     short_name = 'NISAR_L2_GUNW_BETA_V1'
-    keyword = '_'.join(reference_path.split('_')[4:8])
+    keyword = '_'.join(reference_path.split('_')[5:8])
     results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
+    if len(results) == 0:
+        short_name_prov = 'NISAR_L2_GUNW_PROVISIONAL_V1'
+        results = earthaccess.search_data(short_name=short_name_prov, granule_name=f'*{keyword}*')
+        if len(results) == 0:
+            raise ValueError(f'No {short_name} or {short_name_prov} granule found for {keyword}')
     gunw = results[0].data_links()[0].split('/')[-2]
     res = asf.granule_search(gunw)
     yaml_url = res.find_urls(pattern=r'.yaml')[0]
@@ -187,8 +195,8 @@ def get_orbit(scene_name: str) -> str:
         orbit_path: Path of the orbit file.
     """
     short_name = 'NISAR_OE'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
     temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
     results = earthaccess.search_data(short_name=short_name, granule_name='*POE*', temporal=temporal)
     if len(results) == 0:
@@ -214,8 +222,8 @@ def get_tropo(scene_name: str) -> str:
         tropo_path: Path of the file.
     """
     short_name = 'ASF_ECMWF_TROP'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    day = datetime(start_date.year, start_date.month, start_date.day)
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    day = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
     if start_date.hour % 6 < 3:
         tropo_date = day + timedelta(hours=int(start_date.hour / 6) * 6)
     else:
@@ -239,8 +247,8 @@ def get_tec(scene_name: str) -> str:
         tropo_path: Path of the file.
     """
     short_name = 'NISAR_TEC'
-    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S')
-    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S')
+    start_date = datetime.strptime(scene_name.split('_')[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
+    end_date = datetime.strptime(scene_name.split('_')[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC)
     temporal = (start_date.strftime('%Y-%m-%d %H:%M:%S'), end_date.strftime('%Y-%m-%d %H:%M:%S'))
     results = earthaccess.search_data(short_name=short_name, temporal=temporal)
     files = sorted(earthaccess.download(results))
@@ -269,29 +277,57 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
     bbox = (bbox[0] - 1, bbox[1] - 1, bbox[2] + 1, bbox[3] + 1)
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
+    folder = files[0].parent
+    files = [f.resolve() for f in files if '.tif' in f.name]
 
-    return str(files[-1])
+    output_raster = folder / 'watermask.tif'
+    vrt_dataset = gdal.BuildVRT(str(folder / 'mosaic.vrt'), files)
+    vrt_dataset = None
+    vrt_dataset = folder / 'mosaic.vrt'
+    # gdal.Warp(str(output_raster), vrt_dataset, dstSRS="EPSG:4326")
+    gdal.Warp(str(output_raster), vrt_dataset)
+
+    if output_raster.exists():
+        return str(output_raster)
+    else:
+        raise RuntimeError('watermask could not be downloaded')
 
 
-def get_dem(scene_poly: ogr.Geometry, epsg_code: int, dem_path: str = 'dem.tif') -> str:
-    """Download DEM for a given polygon.
+def get_dem(reference_path: str, subset: list[float] | None = None) -> str:
+    """Download files to apply ionospheric corrections.
 
     Args:
-        scene_poly: Scene polygon.
-        epsg_code: EPSG code for the output projection.
-        dem_path: Output path for the DEM.
+        reference_path: Path of the reference scene.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the mask
+            is fetched over the AOI instead of the whole frame (the 1-degree buffer
+            below covers the crop margin).
 
     Returns:
-        dem_path: Path of the DEM file.
+        tropo_path: Path of the file.
     """
-    return str(
-        prepare_dem_geotiff(
-            output_name=dem_path,
-            geometry=scene_poly,
-            epsg_code=4326,
-            pixel_size=0.001,
-        )
-    )
+    short_name = 'NISAR_DEM'
+    if subset is None:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+        bbox = poly.bounds
+    else:
+        bbox = subset
+    bbox = (bbox[0] - 1, bbox[1] - 1, bbox[2] + 1, bbox[3] + 1)
+    results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
+    files = sorted(earthaccess.download(results))
+    folder = files[0].parent
+    files = [f.resolve() for f in files if '.tif' in f.name]
+
+    output_raster = folder / 'dem.tif'
+    vrt_dataset = gdal.BuildVRT(str(folder / 'mosaic.vrt'), files)
+    vrt_dataset = None
+    vrt_dataset = folder / 'mosaic.vrt'
+    # gdal.Warp(str(output_raster), vrt_dataset, dstSRS="EPSG:4326")
+    gdal.Warp(str(output_raster), vrt_dataset)
+
+    if output_raster.exists():
+        return str(output_raster)
+    else:
+        raise RuntimeError('DEM could not be downloaded')
 
 
 def get_epsg(lat: float, lon: float) -> int:
@@ -404,8 +440,8 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
 
     tec_path = get_tec(reference_scene)
 
-    scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
-    dem_path = get_dem(scene_polygon, epsg_code)
+    _, epsg_code = get_scene_polygon(reference_path, subset)
+    dem_path = get_dem(reference_path, subset)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # crossmul looks the crop aligns to; download once and reuse for both.
@@ -436,6 +472,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
         secondary_orbit,
         reference_tropo,
         secondary_tropo,
+        dem_path,
         tec_path,
         watermask,
         template_yaml,
