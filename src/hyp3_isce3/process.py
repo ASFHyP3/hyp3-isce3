@@ -146,14 +146,15 @@ def download_yaml(reference_path: str) -> Path:
     Returns:
         tmp_path: Path of the yaml file.
     """
-    short_name = 'NISAR_L2_GUNW_BETA_V1'
     keyword = '_'.join(reference_path.split('_')[5:8])
-    results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
-    if len(results) == 0:
-        short_name_prov = 'NISAR_L2_GUNW_PROVISIONAL_V1'
-        results = earthaccess.search_data(short_name=short_name_prov, granule_name=f'*{keyword}*')
-        if len(results) == 0:
-            raise ValueError(f'No {short_name} or {short_name_prov} granule found for {keyword}')
+    # Prefer the PROVISIONAL template (current production settings); fall back to BETA.
+    short_names = ['NISAR_L2_GUNW_PROVISIONAL_V1', 'NISAR_L2_GUNW_BETA_V1']
+    for short_name in short_names:
+        results = earthaccess.search_data(short_name=short_name, granule_name=f'*{keyword}*')
+        if results:
+            break
+    else:
+        raise ValueError(f'No GUNW granule found for {keyword} in {short_names}')
     gunw = results[0].data_links()[0].split('/')[-2]
     res = asf.granule_search(gunw)
     yaml_url = res.find_urls(pattern=r'.yaml')[0]
@@ -294,16 +295,16 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
 
 
 def get_dem(reference_path: str, subset: list[float] | None = None) -> str:
-    """Download files to apply ionospheric corrections.
+    """Download the NISAR DEM tiles covering the scene and mosaic them into one GeoTIFF.
 
     Args:
         reference_path: Path of the reference scene.
-        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the mask
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM
             is fetched over the AOI instead of the whole frame (the 1-degree buffer
             below covers the crop margin).
 
     Returns:
-        tropo_path: Path of the file.
+        dem_path: Path of the mosaicked DEM file.
     """
     short_name = 'NISAR_DEM'
     if subset is None:
