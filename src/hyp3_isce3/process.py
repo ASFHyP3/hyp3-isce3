@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import math
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -118,11 +119,13 @@ def get_config(
     return Path('insar.yaml')
 
 
-def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
-    """Read the InSAR crossmul (azimuth, range) multilook looks from the runconfig template.
+def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
+    """Read the crop snapping steps from the runconfig's crossmul and phase_unwrap looks.
 
-    The RSLC crop floors its window origin to these so the crop's multilook cells
-    coincide with a full-frame run. Sourcing them from the same runconfig the
+    The wrapped interferogram is multilooked at the crossmul looks, and the unwrapped layers
+    (and the ionosphere step, for both bands) at the phase_unwrap looks, all counted from the
+    first line/sample. The RSLC crop floors its window origin to a multiple of both so every
+    multilook grid coincides with a full-frame run. Sourcing them from the same runconfig the
     workflow runs guarantees the two never drift. If looks are ever exposed as a
     user/processing parameter, read that parameter here instead so the crop tracks it.
 
@@ -130,10 +133,15 @@ def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
         template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`).
 
     Returns:
-        looks: (azimuth_looks, range_looks) from the runconfig ``crossmul`` block.
+        az_step: Azimuth snap step, the lcm of the crossmul and phase_unwrap azimuth looks.
+        rg_step: frequencyA range snap step, the lcm of the crossmul and phase_unwrap range looks.
+        rg_looks_b: frequencyB range looks, the phase_unwrap range looks the ionosphere step uses.
     """
-    crossmul = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['crossmul']
-    return int(crossmul['azimuth_looks']), int(crossmul['range_looks'])
+    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
+    crossmul, unwrap = processing['crossmul'], processing['phase_unwrap']
+    az_step = math.lcm(int(crossmul['azimuth_looks']), int(unwrap['azimuth_looks']))
+    rg_step = math.lcm(int(crossmul['range_looks']), int(unwrap['range_looks']))
+    return az_step, rg_step, int(unwrap['range_looks'])
 
 
 def download_yaml(reference_path: str) -> Path:
@@ -429,26 +437,23 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     dem_path = get_dem(scene_polygon, epsg_code)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
-    # crossmul looks the crop aligns to; download once and reuse for both.
+    # multilook looks the crop aligns to; download once and reuse for both.
     template_yaml = download_yaml(reference_path)
 
     # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
-    # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
+    # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
     subset_utm = None
     if subset:
         # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
         # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
         # decorrelated areas).
         subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
-        az_looks, rg_looks = get_crossmul_looks(template_yaml)
+        az_step, rg_step, rg_looks_b = get_multilook_looks(template_yaml)
+        looks = {'az_looks': az_step, 'rg_looks': rg_step, 'rg_looks_b': rg_looks_b}
         # Stream each RSLC's AOI window into a cropped <scene>_sub.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.
-        reference_path = crop_streamed(
-            reference_scene, reference_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
-        )
-        secondary_path = crop_streamed(
-            secondary_scene, secondary_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
-        )
+        reference_path = crop_streamed(reference_scene, reference_path, subset, dem_path, **looks)
+        secondary_path = crop_streamed(secondary_scene, secondary_path, subset, dem_path, **looks)
 
     yaml_path = get_config(
         reference_path,
