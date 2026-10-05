@@ -249,7 +249,7 @@ def get_tec(scene_name: str) -> str:
 
 
 def get_watermask(reference_path: str, subset: list[float] | None = None) -> str:
-    """Download files to apply ionospheric corrections.
+    """Download files to apply watermasking.
 
     Args:
         reference_path: Path of the reference scene.
@@ -258,7 +258,7 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
             below covers the crop margin).
 
     Returns:
-        tropo_path: Path of the file.
+        watermask_path: Path of the water mask file.
     """
     short_name = 'NISAR_WATERMASK'
     if subset is None:
