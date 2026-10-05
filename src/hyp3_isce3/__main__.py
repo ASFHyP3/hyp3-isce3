@@ -31,7 +31,7 @@ def earlier_granule_first(g1: str, g2: str) -> tuple[str, str]:
 
     Args:
         g1: First granule.
-        g2: Second grnaule.
+        g2: Second granule.
 
     Returns:
         reference: Reference granule.
