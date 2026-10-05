@@ -290,7 +290,7 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
     """
     short_name = 'NISAR_WATERMASK'
     if subset:
-        bbox = subset
+        bbox = tuple(subset)
     else:
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
         bbox = poly.bounds
