@@ -73,7 +73,7 @@ def main() -> None:
 
         if len(args.subset) == 0:
             args.subset = None
-        elif not len(args.subset) == 4:
+        elif len(args.subset) != 4:
             raise ValueError('The number of coordinates is not four')
 
     username = os.getenv('EARTHDATA_USERNAME')

@@ -16,6 +16,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--subset` crops now snap their origin to both the crossmul and phase_unwrap looks (and frequencyB to its own unwrap looks), so every multilook grid lines up with a full-frame run.
 - `--subset` crops now crop `inputDataExceptionMask` with the image window and set `identification/isFullFrame` to `False`.
 - Corrected copy-pasted or outdated docstrings in `process.py` and `__main__.py`.
+- Updated ISCE3 version and included provisional collection for GUNWs.
 
 ## [0.3.0]
 

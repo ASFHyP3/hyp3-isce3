@@ -14,6 +14,8 @@ def test_get_config(monkeypatch, tmp_path):
     reference_tropo = 'REFERENCE_TROPO.nc'
     secondary_tropo = 'SECONDARY_TROPO.nc'
 
+    dem_path = 'DEM.tif'
+
     tec_path = 'TEC.json'
     watermask = 'WATERMASK.vrt'
 
@@ -27,6 +29,7 @@ def test_get_config(monkeypatch, tmp_path):
         secondary_orbit,
         reference_tropo,
         secondary_tropo,
+        dem_path,
         tec_path,
         watermask,
         temp_yaml,
@@ -116,6 +119,7 @@ def test_get_config_subset(monkeypatch, tmp_path):
         'SECORB.xml',
         'REFTROP.nc',
         'SECTROP.nc',
+        'DEM.tif',
         'TEC.json',
         'WMASK.vrt',
         Path('temp.yaml'),

@@ -11,7 +11,7 @@ runconfig:
             qa_runw_input_file: output/RUNW_product.h5
             qa_gunw_input_file: output/GUNW_product.h5
         dynamic_ancillary_file_group:
-            dem_file: dem.tif
+            dem_file: dem_path
             dem_file_description: Digital Elevation Model (DEM) for the 
                 NASA-ISRO NISAR mission, version 1.2, based on the Copernicus 
                 DEM 30-m (2023_1), referenced to the WGS84 ellipsoid. This 
