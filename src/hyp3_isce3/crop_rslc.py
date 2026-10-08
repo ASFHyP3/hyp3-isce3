@@ -419,15 +419,6 @@ def _replace_identification_string(dst: h5py.File, identification_path: str, nam
         d.attrs[k] = v
 
 
-def _set_bounding_polygon(dst: h5py.File, identification_path: str, wkt: str) -> None:
-    """Replace the (full-scene) identification boundingPolygon with the cropped footprint.
-
-    The GUNW writer copies this field straight from the reference RSLC, so leaving
-    the full-frame polygon would mislabel the cropped product's footprint.
-    """
-    _replace_identification_string(dst, identification_path, 'boundingPolygon', wkt)
-
-
 def _copy_except(src: h5py.Group, dst: h5py.Group, skip: set[str]) -> None:
     """Copy ``src`` into ``dst`` verbatim, skipping the ``skip`` subtrees (root-relative paths).
 
@@ -558,7 +549,8 @@ def crop_rslc_from_handle(
         time_units = swath_t.attrs.get('units')
         if time_units is not None:
             _update_identification_times(dst, identification, time_units, az_lo, az_hi)
-        _set_bounding_polygon(dst, identification, _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi))
+        footprint = _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi)
+        _replace_identification_string(dst, identification, 'boundingPolygon', footprint)
         # A crop never covers the full frame; the InSAR writers copy this flag into every product.
         _replace_identification_string(dst, identification, 'isFullFrame', 'False')
     log.info('Wrote cropped RSLC: %s', dst_h5)
