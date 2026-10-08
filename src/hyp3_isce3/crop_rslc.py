@@ -318,7 +318,8 @@ def geocode_subset_box(
     xmin, ymin, xmax, ymax = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
 
     geocode = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['geocode']
-    if int(geocode['output_epsg']) != epsg_code:
+    # The fallback runconfig has no frame grid to snap to (output_epsg is blank).
+    if geocode['output_epsg'] is None or int(geocode['output_epsg']) != epsg_code:
         log.warning(
             'Subset EPSG %d != template geocode EPSG %s; skipping grid snap.', epsg_code, geocode['output_epsg']
         )

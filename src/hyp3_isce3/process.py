@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import logging
 import math
+import shutil
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,7 +19,7 @@ from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 from osgeo import gdal
 
-from hyp3_isce3.constants import ANCILLARY_BUFFER_DEG, DEM_SUBSET_BUFFER_DEG
+import hyp3_isce3
 from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
 from hyp3_isce3.crop_tropo import crop_tropo
 from hyp3_isce3.search import find_rslc, search_nisar
@@ -54,7 +55,7 @@ def decode_rslc_name(name: str) -> dict:
         'common': '_'.join(parts[5:11]),  # fields a compatible reference/secondary pair must share
         'dates': '_'.join(parts[11:13]),  # the start_end datetime tokens
         'center': '_'.join(parts[13:18]),  # trailing processing-center fields
-        'search_keyword': '_'.join(parts[4:8]),  # cycle_track_direction_frame, to find the matching GUNW
+        'search_keyword': '_'.join(parts[5:8]),  # track_direction_frame, to find a GUNW on the same frame
     }
 
 
@@ -108,6 +109,7 @@ def get_config(
         template_yaml: Path of the downloaded production runconfig (from :func:`download_yaml`).
         subset_utm: Optional (xmin, ymin, xmax, ymax) output box in UTM meters.
         output_epsg: EPSG code of ``subset_utm``; written into the geocode blocks so the corners and projection stay consistent.
+            Without a subset it fills only a blank output_epsg (as in the fallback runconfig).
 
     Returns:
         yaml_file: Path of the configuration file.
@@ -159,6 +161,9 @@ def get_config(
     # direction, frame, secondary cycle) and the release, as in a production GUNW name.
     reference, secondary = decode_rslc_name(reference_path), decode_rslc_name(secondary_path)
     crid, accuracy, coverage = reference['center'].split('_')[:3]
+    # A subset covers only part of the frame, so mark it partial ('P') per the NISAR naming convention.
+    if subset_utm:
+        coverage = 'P'
     # Fall back to the reference RSLC's release if the template carries no CRID.
     executable['composite_release_id'] = executable.get('composite_release_id') or crid
     executable['partial_granule_id'] = (
@@ -177,6 +182,10 @@ def get_config(
             grid['output_epsg'] = output_epsg
             grid['top_left'] = {'x_abs': xmin, 'y_abs': ymax}
             grid['bottom_right'] = {'x_abs': xmax, 'y_abs': ymin}
+    elif groups['processing'].get('geocode', {}).get('output_epsg') is None:
+        # Only the fallback runconfig has a blank geocode projection, and isce3 would otherwise take
+        # the DEM's lat/lon EPSG; use the scene's UTM zone (isce3 copies it to radar_grid_cubes).
+        groups['processing'].setdefault('geocode', {})['output_epsg'] = output_epsg
 
     yaml_file = Path('insar.yaml')
     yaml_file.write_text(yaml.safe_dump(runconfig, sort_keys=False))
@@ -218,7 +227,14 @@ def download_yaml(reference_path: str) -> Path:
         tmp_yaml: Path of the yaml file.
     """
     keyword = decode_rslc_name(reference_path)['search_keyword']
-    results = search_nisar('L2', 'GUNW', granule_name=f'*{keyword}*')
+    try:
+        results = search_nisar('L2', 'GUNW', granule_name=f'*{keyword}*')
+    except ValueError:
+        # No production GUNW on this frame yet; use the shipped runconfig instead. Copy it,
+        # since the caller deletes temp.yaml once it is consumed.
+        log.warning(f'No production GUNW found for frame {keyword}; using the fallback runconfig.')
+        fallback = Path(hyp3_isce3.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
+        return Path(shutil.copy(fallback, 'temp.yaml'))
     gunw = results[0].data_links()[0].split('/')[-2]
     res = asf.granule_search(gunw)
     yaml_url = res.find_urls(pattern=r'.yaml')[0]
@@ -238,8 +254,12 @@ def download_rslc(granule_name: str) -> str:
     Returns:
         h5file_path: Path of the h5 file.
     """
-    # Same lookup as the streaming path; an RSLC granule's only file is its .h5.
-    return str(earthaccess.download([find_rslc(granule_name)])[0])
+    # Same lookup as the streaming path; keep only the .h5 in case the granule ships other files.
+    files = earthaccess.download([find_rslc(granule_name)])
+    h5_files = [f for f in files if str(f).endswith('.h5')]
+    if not h5_files:
+        raise RuntimeError(f'No .h5 file downloaded for {granule_name}')
+    return str(h5_files[0])
 
 
 def get_orbit(scene_name: str) -> str:
@@ -348,7 +368,7 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
     else:
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
         bbox = poly.bounds
-    buf = ANCILLARY_BUFFER_DEG
+    buf = 1.0  # degrees padded around the AOI or frame so the mosaic covers the crop margin
     bbox = (bbox[0] - buf, bbox[1] - buf, bbox[2] + buf, bbox[3] + buf)
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
@@ -386,12 +406,17 @@ def get_dem(reference_path: str, subset: list[float] | None = None) -> str:
     else:
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
         bbox = poly.bounds
-    buf = ANCILLARY_BUFFER_DEG
+    buf = 1.0  # degrees padded around the AOI or frame so the mosaic covers the crop margin
     bbox = (bbox[0] - buf, bbox[1] - buf, bbox[2] + buf, bbox[3] + buf)
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
     folder = files[0].parent
     files = [f.resolve() for f in files if '.tif' in f.name]
+    # Near the poles the search also returns polar-stereographic (EPSG:3413/3031) copies of the same
+    # DEM. The EPSG:4326 tiles cover the globe on their own, and BuildVRT can't mix projections.
+    files = [f for f in files if gdal.Open(str(f)).GetSpatialRef().GetAuthorityCode(None) == '4326']
+    if not files:
+        raise RuntimeError(f'No EPSG:4326 NISAR DEM tiles found for bbox {bbox}')
 
     output_raster = folder / 'dem.tif'
     vrt_dataset = gdal.BuildVRT(str(folder / 'mosaic.vrt'), files)
@@ -439,7 +464,7 @@ def get_epsg_code(reference_path: str, subset: list[float] | None = None) -> int
     if subset:
         # Buffer the AOI past the 512-px crop margin's ground extent (~5-6 km); the
         # extra apply_margin_to_geographic_box 5 km below then adds further headroom.
-        buf = DEM_SUBSET_BUFFER_DEG
+        buf = 0.1  # degrees (~11 km)
         bbox = [subset[0] - buf, subset[1] - buf, subset[2] + buf, subset[3] + buf]
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=bbox, bbox_epsg='4326')
     else:

@@ -2,7 +2,8 @@ from pathlib import Path
 
 import yaml
 
-from hyp3_isce3.process import get_config, get_multilook_looks
+from hyp3_isce3 import process
+from hyp3_isce3.process import download_yaml, get_config, get_multilook_looks
 
 
 REFERENCE = 'NISAR_L1_PR_RSLC_005_019_A_011_4005_DHDH_A_20251111T120539_20251111T120614_P05023_N_F_J_001'
@@ -179,3 +180,60 @@ def test_get_config_subset(monkeypatch, tmp_path):
         assert grid['bottom_right'] == {'x_abs': 300.0, 'y_abs': 200.0}
     # dem_download uses x/y (not x_abs/y_abs) and is left untouched.
     assert groups['processing']['dem_download']['top_left'] == {'x': None, 'y': None}
+    # A subset is a partial-frame product, so the coverage field is 'P'.
+    assert groups['primary_executable']['partial_granule_id'].endswith('_P05023_N_P_A_001')
+
+
+def test_get_config_keeps_production_epsg(monkeypatch, tmp_path):
+    # A full-frame run on a production template keeps its projection even when a scene EPSG is passed.
+    monkeypatch.chdir(tmp_path)
+    groups = _get_config(tmp_path, output_epsg=32611)
+    assert groups['processing']['geocode']['output_epsg'] == 9999
+    assert groups['processing']['radar_grid_cubes']['output_epsg'] == 9999
+    assert groups['processing']['geocode']['top_left'] == {'y_abs': 0.0, 'x_abs': 0.0}
+
+
+def test_get_config_fills_blank_epsg(monkeypatch, tmp_path):
+    # A template with a blank geocode output_epsg (the fallback runconfig) gets the scene's UTM zone, not the DEM's.
+    monkeypatch.chdir(tmp_path)
+    template = _write_template(tmp_path / 'temp.yaml')
+    runconfig = yaml.safe_load(template.read_text())
+    for block in ('geocode', 'radar_grid_cubes'):
+        runconfig['runconfig']['groups']['processing'][block]['output_epsg'] = None
+    template.write_text(yaml.safe_dump(runconfig))
+    yaml_path = get_config(
+        f'{REFERENCE}.h5',
+        f'{SECONDARY}.h5',
+        'REFORB.xml',
+        'SECORB.xml',
+        'REFTROP.nc',
+        'SECTROP.nc',
+        'DEM.tif',
+        'TEC.json',
+        'WMASK.vrt',
+        template,
+        output_epsg=32611,
+    )
+    processing = yaml.safe_load(yaml_path.read_text())['runconfig']['groups']['processing']
+    assert processing['geocode']['output_epsg'] == 32611
+    # radar_grid_cubes is left blank; isce3 copies the geocode EPSG into it.
+    assert processing['radar_grid_cubes']['output_epsg'] is None
+    # Without a subset the corners pass through untouched (blank in the fallback, so isce3 sizes the grid).
+    assert processing['geocode']['top_left'] == {'y_abs': 0.0, 'x_abs': 0.0}
+
+
+def test_download_yaml_fallback(monkeypatch, tmp_path):
+    # With no production GUNW on the frame, the shipped fallback runconfig is copied to temp.yaml.
+    monkeypatch.chdir(tmp_path)
+
+    def no_gunw(*args, **kwargs):
+        raise ValueError('no granules')
+
+    monkeypatch.setattr(process, 'search_nisar', no_gunw)
+    template = download_yaml(f'{REFERENCE}.h5')
+    fallback = Path(process.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
+    assert template == Path('temp.yaml')
+    assert template.read_text() == fallback.read_text()
+    groups = yaml.safe_load(template.read_text())['runconfig']['groups']
+    assert groups['processing']['geocode']['output_epsg'] is None
+    assert groups['processing']['crossmul'] == {'range_looks': 5, 'azimuth_looks': 6}
