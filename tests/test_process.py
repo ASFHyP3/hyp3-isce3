@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hyp3_isce3.process import get_config, get_crossmul_looks
+from hyp3_isce3.process import get_config, get_multilook_looks
 
 
 def test_get_config(monkeypatch, tmp_path):
@@ -65,12 +65,16 @@ def test_get_config(monkeypatch, tmp_path):
     assert 'partial_granule_id:' in lines[-1]
 
 
-def test_get_crossmul_looks(tmp_path):
+def test_get_multilook_looks(tmp_path):
+    # Production-like looks: crossmul 6 az x 5 rg, phase_unwrap 16 az x 13 rg.
     rc = tmp_path / 'rc.yaml'
     rc.write_text(
-        'runconfig:\n  groups:\n    processing:\n      crossmul:\n        range_looks: 7\n        azimuth_looks: 16\n'
+        'runconfig:\n  groups:\n    processing:\n'
+        '      crossmul:\n        range_looks: 5\n        azimuth_looks: 6\n'
+        '      phase_unwrap:\n        range_looks: 13\n        azimuth_looks: 16\n'
     )
-    assert get_crossmul_looks(rc) == (16, 7)
+    # Snap steps are the lcm of both grids (48 az, 65 rg); frequencyB uses the unwrap range looks.
+    assert get_multilook_looks(rc) == (48, 65, 13)
 
 
 def test_get_config_subset(monkeypatch, tmp_path):

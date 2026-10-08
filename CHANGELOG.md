@@ -9,6 +9,13 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.3.1]
 
 ### Changed
+- With `--subset`, the ECMWF troposphere weather models are now streamed and cropped to the AOI plus a 1-degree buffer (new `hyp3_isce3.crop_tropo` module) instead of downloading each ~2 GB global file. The cropped file is ~0.5 MB and gives identical RAiDER delays.
+
+### Fixed
+- `--subset` crops now derive the frequencyB range window from frequencyA's so both bands start at the same slant range. isce3's split-band ionosphere step decimates frequencyA offsets onto frequencyB, so independently windowed bands misregistered frequencyB by over a resolution cell, decorrelating it and leaving the ionosphere filter mask (bit 24 of the GUNW `mask` layer) speckled.
+- `--subset` crops now snap their origin to both the crossmul and phase_unwrap looks (and frequencyB to its own unwrap looks), so every multilook grid lines up with a full-frame run.
+- `--subset` crops now crop `inputDataExceptionMask` with the image window and set `identification/isFullFrame` to `False`.
+- Corrected copy-pasted or outdated docstrings in `process.py` and `__main__.py`.
 - Updated ISCE3 version and included provisional collection for GUNWs.
 
 ## [0.3.0]
