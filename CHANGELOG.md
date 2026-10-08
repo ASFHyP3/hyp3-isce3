@@ -14,7 +14,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each pair is processed in its own `./<product_id>/` working directory; `process_isce3` returns the absolute path of the zip inside it.
 - NISAR RSLC and GUNW lookups search the PROVISIONAL, BETA, and operational collections through one shared `hyp3_isce3.search` module; full RSLC downloads now use earthaccess like streaming.
 - Cropped RSLCs are named as their granule (`<scene>.h5`), so the GUNW's input granule metadata lists the true RSLC names.
-- `aoi_to_radar_window` and `crop_streamed` now require `az_looks` and `rg_looks`.
+- `aoi_to_radar_window` and `crop_streamed` now require `az_looks` and `rg_looks` as keyword arguments (`rg_looks_b` stays optional).
 
 ### Fixed
 - The GUNW product ID relabels only the producer field (`J` -> `A`), not every `J` in the trailing fields.
@@ -22,6 +22,18 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 - `schemas/insar.yaml` (the runconfig header template).
+
+## [0.3.1]
+
+### Changed
+- With `--subset`, the ECMWF troposphere weather models are now streamed and cropped to the AOI plus a 1-degree buffer (new `hyp3_isce3.crop_tropo` module) instead of downloading each ~2 GB global file. The cropped file is ~0.5 MB and gives identical RAiDER delays.
+
+### Fixed
+- `--subset` crops now derive the frequencyB range window from frequencyA's so both bands start at the same slant range. isce3's split-band ionosphere step decimates frequencyA offsets onto frequencyB, so independently windowed bands misregistered frequencyB by over a resolution cell, decorrelating it and leaving the ionosphere filter mask (bit 24 of the GUNW `mask` layer) speckled.
+- `--subset` crops now snap their origin to both the crossmul and phase_unwrap looks (and frequencyB to its own unwrap looks), so every multilook grid lines up with a full-frame run.
+- `--subset` crops now crop `inputDataExceptionMask` with the image window and set `identification/isFullFrame` to `False`.
+- Corrected copy-pasted or outdated docstrings in `process.py` and `__main__.py`.
+- Updated ISCE3 version and included provisional collection for GUNWs.
 
 ## [0.3.0]
 

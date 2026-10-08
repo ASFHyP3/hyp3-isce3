@@ -85,6 +85,9 @@ def _make_rslc(path):
             for k, pol in enumerate(('HH', 'HV')):
                 img = (np.arange(N_LINES)[:, None] * 1000 + np.arange(nrg)[None, :] + k * 0.5j).astype('c8')
                 g.create_dataset(pol, data=img, chunks=(8, min(8, nrg)), compression='gzip')
+            # Image-shaped exception mask with per-(line,sample) values so its crop is verifiable.
+            exc = (np.arange(N_LINES)[:, None] * 7 + np.arange(nrg)[None, :]) % 251
+            g.create_dataset('inputDataExceptionMask', data=exc.astype('u1'))
             g.create_dataset('slantRange', data=slant)
             g.create_dataset('slantRangeSpacing', data=float(slant[1] - slant[0]))
             vs = np.tile([VALID_START, VALID_END], (N_LINES, 1)).astype('u4')
@@ -104,6 +107,8 @@ def _make_rslc(path):
         # identification times + footprint -> must be restamped to the cropped extent.
         ident = f.create_group('science/LSAR/identification')
         ident.create_dataset('zeroDopplerStartTime', data=np.bytes_('2025-01-01T00:00:00'))
+        full = ident.create_dataset('isFullFrame', data=np.bytes_('True'))
+        full.attrs['frameCoveragePercentage'] = 98.1
         ident.create_dataset('zeroDopplerEndTime', data=np.bytes_('2025-01-01T00:01:39'))
         ident.create_dataset(
             'boundingPolygon', data=np.bytes_('POLYGON ((-180 -90, 180 -90, 180 90, -180 90, -180 -90))')
@@ -172,8 +177,9 @@ class TestAoiToRadarWindow:
         )
 
     def test_window_start_floored_to_looks(self, rslc_h5, monkeypatch):
-        # Corners -> az 30-50, range 36-60 -> padded (26,54)/(32,64); starts floor
-        # to a multiple of the looks: 26 -> 16 (az 16), 32 -> 28 (rg 7).
+        # Corners -> az 30-50, range 36-60 -> padded (26,54)/(32,64). az floors to a
+        # multiple of 16 -> 16. frequencyA's start must be a multiple of 7 that is also a
+        # frequencyB sample (every 8th) whose B index is a multiple of 7, i.e. a multiple of 56 -> 0.
         monkeypatch.setattr(
             crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
         )
@@ -181,11 +187,12 @@ class TestAoiToRadarWindow:
             self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=16, rg_looks=7
         )
         assert window['az'] == (16, 54)
-        assert window['frequencyA'] == (28, 64)
-        # rg_looks is applied to every frequency's own grid: freqB padded (1,12) -> start floored to 0.
-        assert window['frequencyB'] == (0, 12)
+        assert window['frequencyA'] == (0, 64)
+        # frequencyB starts with frequencyA (slant 0) and ends at its last sample inside A (slant 56 <= 63).
+        assert window['frequencyB'] == (0, 8)
 
     def test_looks_of_one_is_no_snap(self, rslc_h5, monkeypatch):
+        # With looks of 1 only the band alignment applies: 32 is already a frequencyB sample (B index 4).
         monkeypatch.setattr(
             crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
         )
@@ -193,6 +200,34 @@ class TestAoiToRadarWindow:
             self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=1, rg_looks=1
         )
         assert window['az'] == (26, 54) and window['frequencyA'] == (32, 64)
+        assert window['frequencyB'] == (4, 8)
+
+    def test_band_windows_start_at_same_slant_range(self, rslc_h5, monkeypatch):
+        # The split-band ionosphere step needs each band to start at the same slant range.
+        monkeypatch.setattr(
+            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+        )
+        for rg_looks in (1, 3, 7):
+            window = crop_mod.aoi_to_radar_window(
+                self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=1, rg_looks=rg_looks
+            )
+            (pa0, pa1), (pb0, pb1) = window['frequencyA'], window['frequencyB']
+            assert SLANT_A[pa0] == SLANT_B[pb0]
+            # frequencyB ends inside frequencyA's span, so no decimated offsets are padded.
+            assert SLANT_B[pb1 - 1] <= SLANT_A[pa1 - 1]
+            assert pa0 % rg_looks == 0 and pb0 % rg_looks == 0
+
+    def test_frequency_b_uses_its_own_looks(self, rslc_h5, monkeypatch):
+        # frequencyB's start must be a multiple of rg_looks_b (its unwrap looks), not rg_looks.
+        monkeypatch.setattr(
+            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+        )
+        window = crop_mod.aoi_to_radar_window(
+            self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=1, rg_looks=1, rg_looks_b=3
+        )
+        # A start floors from 32 to 24, the first sample whose B index (3) is a multiple of 3.
+        assert window['frequencyA'] == (24, 64)
+        assert window['frequencyB'] == (3, 8)
 
     def test_overrun_warns(self, rslc_h5, monkeypatch, caplog):
         # Range extent reaches below the swath start -> clamped, with a warning.
@@ -204,6 +239,27 @@ class TestAoiToRadarWindow:
                 self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=16, rg_looks=7
             )
         assert 'extends past the swath' in caplog.text
+
+
+class TestNestedBandWindow:
+    """Aligning a coarse side band's window to the main band's, isce3-free."""
+
+    def test_offset_side_grid(self):
+        # Side band starting 2 main samples in: aligned starts sit 2 + 8k into the main band.
+        slant_side = SLANT_A[2::8]
+        (pa0, pa1), (pb0, pb1) = crop_mod._nested_band_window(SLANT_A, slant_side, 40, 64, 1, 1)
+        assert (pa0, pb0) == (34, 4) and slant_side[pb0] == SLANT_A[pa0]
+        assert slant_side[pb1 - 1] <= SLANT_A[pa1 - 1]
+
+    def test_separate_band_looks(self):
+        # Main start a multiple of 2 and side start a multiple of 3 -> main start a multiple of 24.
+        (pa0, _), (pb0, _) = crop_mod._nested_band_window(SLANT_A, SLANT_B, 60, 64, 2, 3)
+        assert (pa0, pb0) == (48, 6) and SLANT_B[pb0] == SLANT_A[pa0]
+
+    def test_side_not_on_main_grid_raises(self):
+        # A side band shifted half a main sample can never share a start.
+        with pytest.raises(ValueError, match='not on the frequencyA range grid'):
+            crop_mod._nested_band_window(SLANT_A, SLANT_B + 0.5, 32, 64, 1, 1)
 
 
 class TestCropRslc:
@@ -229,6 +285,17 @@ class TestCropRslc:
         with h5py.File(rslc_h5, 'r') as src, h5py.File(dst, 'r') as out:
             expect = src[f'{_SWATHS}/frequencyA/HH'][a0:a1, p0:p1]
             np.testing.assert_array_equal(out[f'{_SWATHS}/frequencyA/HH'][()], expect)
+
+    def test_exception_mask_is_the_window(self, rslc_h5, tmp_path):
+        # isce3 reads inputDataExceptionMask at the image's (line, sample), so it must be cropped with it.
+        dst = tmp_path / 'out.h5'
+        crop_rslc(rslc_h5, dst, EXPECTED_WINDOW, POLARIZATIONS)
+        a0, a1 = EXPECTED_WINDOW['az']
+        with h5py.File(rslc_h5, 'r') as src, h5py.File(dst, 'r') as out:
+            for fr in ('frequencyA', 'frequencyB'):
+                p0, p1 = EXPECTED_WINDOW[fr]
+                expect = src[f'{_SWATHS}/{fr}/inputDataExceptionMask'][a0:a1, p0:p1]
+                np.testing.assert_array_equal(out[f'{_SWATHS}/{fr}/inputDataExceptionMask'][()], expect)
 
     def test_valid_samples_shifted_and_clipped(self, rslc_h5, tmp_path):
         dst = tmp_path / 'out.h5'
@@ -293,6 +360,15 @@ class TestCropRslc:
             assert f[f'{pp}/referenceTerrainHeight'].shape == (N_AZG,)
             assert f[f'{pp}/frequencyA/dopplerCentroid'].shape == (N_AZG, N_RGG)
             assert f[f'{pp}/rangeChirpWeighting'].shape == (8,)
+
+    def test_marked_not_full_frame(self, rslc_h5, tmp_path):
+        # The InSAR writers copy isFullFrame into every product; a crop must say False.
+        dst = tmp_path / 'out.h5'
+        crop_rslc(rslc_h5, dst, EXPECTED_WINDOW, POLARIZATIONS)
+        with h5py.File(dst, 'r') as f:
+            flag = f['science/LSAR/identification/isFullFrame']
+            assert flag[()] == b'False'
+            assert flag.attrs['frameCoveragePercentage'] == 98.1
 
     def test_bounding_polygon_recomputed(self, rslc_h5, tmp_path):
         dst = tmp_path / 'out.h5'

@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import logging
+import math
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,14 +12,15 @@ import asf_search as asf
 import earthaccess
 import h5py
 import utm
+import xarray as xr
 import yaml
-from hyp3lib.dem import prepare_dem_geotiff
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
-from osgeo import ogr, osr
+from osgeo import gdal
 
 from hyp3_isce3.constants import ANCILLARY_BUFFER_DEG, DEM_SUBSET_BUFFER_DEG
 from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
+from hyp3_isce3.crop_tropo import crop_tropo
 from hyp3_isce3.search import find_rslc, search_nisar
 
 
@@ -181,11 +183,13 @@ def get_config(
     return yaml_file
 
 
-def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
-    """Read the InSAR crossmul (azimuth, range) multilook looks from the runconfig template.
+def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
+    """Read the crop snapping steps from the runconfig's crossmul and phase_unwrap looks.
 
-    The RSLC crop floors its window origin to these so the crop's multilook cells
-    coincide with a full-frame run. Sourcing them from the same runconfig the
+    The wrapped interferogram is multilooked at the crossmul looks, and the unwrapped layers
+    (and the ionosphere step, for both bands) at the phase_unwrap looks, all counted from the
+    first line/sample. The RSLC crop floors its window origin to a multiple of both so every
+    multilook grid coincides with a full-frame run. Sourcing them from the same runconfig the
     workflow runs guarantees the two never drift. If looks are ever exposed as a
     user/processing parameter, read that parameter here instead so the crop tracks it.
 
@@ -193,10 +197,15 @@ def get_crossmul_looks(template_yaml: Path) -> tuple[int, int]:
         template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`).
 
     Returns:
-        looks: (azimuth_looks, range_looks) from the runconfig ``crossmul`` block.
+        az_step: Azimuth snap step, the lcm of the crossmul and phase_unwrap azimuth looks.
+        rg_step: frequencyA range snap step, the lcm of the crossmul and phase_unwrap range looks.
+        rg_looks_b: frequencyB range looks, the phase_unwrap range looks the ionosphere step uses.
     """
-    crossmul = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['crossmul']
-    return int(crossmul['azimuth_looks']), int(crossmul['range_looks'])
+    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
+    crossmul, unwrap = processing['crossmul'], processing['phase_unwrap']
+    az_step = math.lcm(int(crossmul['azimuth_looks']), int(unwrap['azimuth_looks']))
+    rg_step = math.lcm(int(crossmul['range_looks']), int(unwrap['range_looks']))
+    return az_step, rg_step, int(unwrap['range_looks'])
 
 
 def download_yaml(reference_path: str) -> Path:
@@ -206,7 +215,7 @@ def download_yaml(reference_path: str) -> Path:
         reference_path: Path of the reference scene.
 
     Returns:
-        tmp_path: Path of the yaml file.
+        tmp_yaml: Path of the yaml file.
     """
     keyword = decode_rslc_name(reference_path)['search_keyword']
     results = search_nisar('L2', 'GUNW', granule_name=f'*{keyword}*')
@@ -258,11 +267,14 @@ def get_orbit(scene_name: str) -> str:
     return str(files[-1])
 
 
-def get_tropo(scene_name: str) -> str:
+def get_tropo(scene_name: str, subset: list[float] | None = None) -> str:
     """Download files to apply tropospheric corrections.
 
     Args:
         scene_name: Scene name.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, only the
+            AOI (plus a 1-degree buffer) of the global weather model is streamed
+            instead of downloading the whole ~2 GB file.
 
     Returns:
         tropo_path: Path of the file.
@@ -279,6 +291,21 @@ def get_tropo(scene_name: str) -> str:
     temporal = (tropo_date.strftime('%Y-%m-%d %H'), tropo_date.strftime('%Y-%m-%d %H'))
     results = earthaccess.search_data(short_name=short_name, temporal=temporal)
 
+    if subset:
+        # Stream only the chunks overlapping the AOI and write them to a small local file.
+        tropo_path = Path(f'{results[-1]["meta"]["native-id"]}_subset.nc')
+        fileobj = earthaccess.open(results[-1:])[0]
+        with xr.open_dataset(fileobj, engine='h5netcdf') as ds:
+            cropped = crop_tropo(ds, subset).load()
+        fileobj.close()
+        for var in cropped.variables.values():
+            # Keep the source encoding (fill values, compression, time units) but drop its
+            # chunk sizes, which are larger than the crop.
+            var.encoding.pop('chunksizes', None)
+        cropped.to_netcdf(tropo_path)
+        log.info(f'Wrote AOI weather model {tropo_path} with shape {dict(cropped.sizes)}')
+        return str(tropo_path)
+
     files = sorted(earthaccess.download(results))
 
     return str(files[-1])
@@ -291,7 +318,7 @@ def get_tec(scene_name: str) -> str:
         scene_name: Scene name.
 
     Returns:
-        tropo_path: Path of the file.
+        tec_path: Path of the TEC file.
     """
     short_name = 'NISAR_TEC'
     scene = decode_rslc_name(scene_name)
@@ -304,7 +331,7 @@ def get_tec(scene_name: str) -> str:
 
 
 def get_watermask(reference_path: str, subset: list[float] | None = None) -> str:
-    """Download files to apply ionospheric corrections.
+    """Download files to apply watermasking.
 
     Args:
         reference_path: Path of the reference scene.
@@ -313,45 +340,74 @@ def get_watermask(reference_path: str, subset: list[float] | None = None) -> str
             below covers the crop margin).
 
     Returns:
-        tropo_path: Path of the file.
+        watermask_path: Path of the water mask file.
     """
     short_name = 'NISAR_WATERMASK'
-    if subset is None:
+    if subset:
+        bbox = tuple(subset)
+    else:
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
         bbox = poly.bounds
-    else:
-        bbox = subset
     buf = ANCILLARY_BUFFER_DEG
     bbox = (bbox[0] - buf, bbox[1] - buf, bbox[2] + buf, bbox[3] + buf)
     results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
     files = sorted(earthaccess.download(results))
+    folder = files[0].parent
+    files = [f.resolve() for f in files if '.tif' in f.name]
 
-    return str(files[-1])
+    output_raster = folder / 'watermask.tif'
+    vrt_dataset = gdal.BuildVRT(str(folder / 'mosaic.vrt'), files)
+    vrt_dataset = None
+    vrt_dataset = folder / 'mosaic.vrt'
+    # gdal.Warp(str(output_raster), vrt_dataset, dstSRS="EPSG:4326")
+    gdal.Warp(str(output_raster), vrt_dataset)
+
+    if output_raster.exists():
+        return str(output_raster)
+    else:
+        raise RuntimeError('watermask could not be downloaded')
 
 
-def get_dem(scene_poly: ogr.Geometry, epsg_code: int, dem_path: str = 'dem.tif') -> str:
-    """Download DEM for a given polygon.
+def get_dem(reference_path: str, subset: list[float] | None = None) -> str:
+    """Download the NISAR DEM tiles covering the scene and mosaic them into one GeoTIFF.
 
     Args:
-        scene_poly: Scene polygon.
-        epsg_code: EPSG code for the output projection.
-        dem_path: Output path for the DEM.
+        reference_path: Path of the reference scene.
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM
+            is fetched over the AOI instead of the whole frame (the 1-degree buffer
+            below covers the crop margin).
 
     Returns:
-        dem_path: Path of the DEM file.
+        dem_path: Path of the mosaicked DEM file.
     """
-    return str(
-        prepare_dem_geotiff(
-            output_name=dem_path,
-            geometry=scene_poly,
-            epsg_code=4326,
-            pixel_size=0.001,
-        )
-    )
+    short_name = 'NISAR_DEM'
+    if subset:
+        bbox = tuple(subset)
+    else:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+        bbox = poly.bounds
+    buf = ANCILLARY_BUFFER_DEG
+    bbox = (bbox[0] - buf, bbox[1] - buf, bbox[2] + buf, bbox[3] + buf)
+    results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
+    files = sorted(earthaccess.download(results))
+    folder = files[0].parent
+    files = [f.resolve() for f in files if '.tif' in f.name]
+
+    output_raster = folder / 'dem.tif'
+    vrt_dataset = gdal.BuildVRT(str(folder / 'mosaic.vrt'), files)
+    vrt_dataset = None
+    vrt_dataset = folder / 'mosaic.vrt'
+    # gdal.Warp(str(output_raster), vrt_dataset, dstSRS="EPSG:4326")
+    gdal.Warp(str(output_raster), vrt_dataset)
+
+    if output_raster.exists():
+        return str(output_raster)
+    else:
+        raise RuntimeError('DEM could not be downloaded')
 
 
 def get_epsg(lat: float, lon: float) -> int:
-    """Get EPSG code from Polygon.
+    """Get the UTM EPSG code for a latitude/longitude point.
 
     Args:
         lat: Latitude coordinate of the centroid.
@@ -368,36 +424,29 @@ def get_epsg(lat: float, lon: float) -> int:
     return epsg_base + zone_number
 
 
-def get_scene_polygon(reference_path: str, subset: list[float] | None = None) -> ogr.Geometry:
+def get_epsg_code(reference_path: str, subset: list[float] | None = None) -> int:
     """Get Polygon for reference scene.
 
     Args:
-        reference_path: Path of the downloaded h5 file.
+        reference_path: Path of the reference scene (full product or skeleton).
         subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM is
             staged over the AOI (plus a buffer for the crop margin and radar-processing
             edges) instead of the whole frame. EPSG is still taken from the full scene.
 
     Returns:
-        geom: Polygon of the reference scene.
+        epsg_code: UTM EPSG code of the full scene's centroid.
     """
-    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
-    epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
-    if subset is None:
-        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=str(epsg_code))
-    else:
+    if subset:
         # Buffer the AOI past the 512-px crop margin's ground extent (~5-6 km); the
         # extra apply_margin_to_geographic_box 5 km below then adds further headroom.
         buf = DEM_SUBSET_BUFFER_DEG
         bbox = [subset[0] - buf, subset[1] - buf, subset[2] + buf, subset[3] + buf]
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=bbox, bbox_epsg='4326')
-    poly = stage_dem.apply_margin_to_geographic_box(poly)
-    geom = ogr.CreateGeometryFromWkt(str(poly))
+    else:
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+    epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
 
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(epsg_code)
-    geom.AssignSpatialReference(srs)
-
-    return geom, epsg_code
+    return epsg_code
 
 
 def get_product_id(reference_scene: str, secondary_scene: str) -> str:
@@ -481,42 +530,39 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
         reference_path = download_rslc(reference_scene)
         secondary_path = download_rslc(secondary_scene)
 
-    # When subsetting, stage the water mask and DEM over the AOI only (orbit/tropo/tec
-    # are temporal, so they are unaffected by the subset).
+    # When subsetting, stage the water mask, weather models, and DEM over the AOI only
+    # (orbit/tec are temporal, so they are unaffected by the subset).
     watermask = get_watermask(reference_path, subset)
 
     reference_orbit = get_orbit(reference_scene)
     secondary_orbit = get_orbit(secondary_scene)
 
-    reference_tropo = get_tropo(reference_scene)
-    secondary_tropo = get_tropo(secondary_scene)
+    reference_tropo = get_tropo(reference_scene, subset)
+    secondary_tropo = get_tropo(secondary_scene, subset)
 
     tec_path = get_tec(reference_scene)
 
-    scene_polygon, epsg_code = get_scene_polygon(reference_path, subset)
-    dem_path = get_dem(scene_polygon, epsg_code)
+    epsg_code = get_epsg_code(reference_path, subset)
+    dem_path = get_dem(reference_path, subset)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
-    # crossmul looks the crop aligns to; download once and reuse for both.
+    # multilook looks the crop aligns to; download once and reuse for both.
     template_yaml = download_yaml(reference_path)
 
     # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
-    # small patch; the crop floors its origin to the crossmul looks (see crop_rslc).
+    # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
     subset_utm = None
     if subset:
         # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
         # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
         # decorrelated areas).
         subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
-        az_looks, rg_looks = get_crossmul_looks(template_yaml)
+        az_step, rg_step, rg_looks_b = get_multilook_looks(template_yaml)
+        looks = {'az_looks': az_step, 'rg_looks': rg_step, 'rg_looks_b': rg_looks_b}
         # Stream each RSLC's AOI window into a cropped <scene>.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.
-        reference_path = crop_streamed(
-            reference_scene, reference_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
-        )
-        secondary_path = crop_streamed(
-            secondary_scene, secondary_path, subset, dem_path, az_looks=az_looks, rg_looks=rg_looks
-        )
+        reference_path = crop_streamed(reference_scene, reference_path, subset, dem_path, **looks)
+        secondary_path = crop_streamed(secondary_scene, secondary_path, subset, dem_path, **looks)
 
     yaml_path = get_config(
         reference_path,
