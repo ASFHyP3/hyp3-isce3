@@ -377,18 +377,18 @@ def get_epsg(lat: float, lon: float) -> int:
     return epsg_base + zone_number
 
 
-def get_scene_polygon(reference_path: str, subset: list[float] | None = None) -> tuple[ogr.Geometry, int]:
+def get_epsg_code(reference_path: str, subset: list[float] | None = None) -> int:
     """Get Polygon for reference scene.
 
     Args:
         reference_path: Path of the reference scene (full product or skeleton).
+        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM is
+            staged over the AOI (plus a buffer for the crop margin and radar-processing
+            edges) instead of the whole frame. EPSG is still taken from the full scene.
 
     Returns:
-        geom: Polygon of the reference scene.
         epsg_code: UTM EPSG code of the full scene's centroid.
     """
-    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
-    epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
     if subset:
         # Buffer the AOI past the 512-px crop margin's ground extent (~5-6 km); the
         # extra apply_margin_to_geographic_box 5 km below then adds further headroom.
@@ -396,15 +396,10 @@ def get_scene_polygon(reference_path: str, subset: list[float] | None = None) ->
         bbox = [subset[0] - buf, subset[1] - buf, subset[2] + buf, subset[3] + buf]
         poly, _ = stage_dem.determine_polygon(reference_path, bbox=bbox, bbox_epsg='4326')
     else:
-        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg=str(epsg_code))
-    poly = stage_dem.apply_margin_to_geographic_box(poly)
-    geom = ogr.CreateGeometryFromWkt(str(poly))
+        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+    epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
 
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(epsg_code)
-    geom.AssignSpatialReference(srs)
-
-    return geom, epsg_code
+    return epsg_code
 
 
 def get_product_id(reference_scene: str, secondary_scene: str) -> str:
@@ -467,7 +462,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
 
     tec_path = get_tec(reference_scene)
 
-    epsg_code = get_scene_epsg(reference_path)
+    epsg_code = get_epsg_code(reference_path, subset)
     dem_path = get_dem(reference_path, subset)
 
     # The JPL runconfig is both our config template (its tail) and the source of the
