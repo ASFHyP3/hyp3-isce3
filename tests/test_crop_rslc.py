@@ -7,6 +7,7 @@ call isce3, though importing the module does (isce3/nisar are imported at top).
 """
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
@@ -570,5 +571,14 @@ def test_geocode_subset_box_epsg_mismatch(tmp_path):
     # Mismatched projection: the anchor is in a different CRS, so the box is reprojected but
     # left un-snapped (returned as the raw transform_bounds result in the requested EPSG).
     box = geocode_subset_box(aoi, 32637, rc)
+    transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True)
+    assert box == transformer.transform_bounds(aoi[0], aoi[1], aoi[2], aoi[3])
+
+
+def test_geocode_subset_box_fallback_runconfig():
+    # The shipped fallback runconfig has a blank output_epsg, so the box is reprojected but not snapped.
+    fallback = Path(crop_mod.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
+    aoi = [40.55, 13.46, 40.78, 13.65]
+    box = geocode_subset_box(aoi, 32637, fallback)
     transformer = Transformer.from_crs('EPSG:4326', 'EPSG:32637', always_xy=True)
     assert box == transformer.transform_bounds(aoi[0], aoi[1], aoi[2], aoi[3])

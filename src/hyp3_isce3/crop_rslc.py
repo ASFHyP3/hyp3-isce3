@@ -66,6 +66,8 @@ import yaml
 from nisar.products.readers import SLC
 from pyproj import Transformer
 
+from hyp3_isce3.search import find_rslc
+
 
 log = logging.getLogger(__name__)
 
@@ -209,8 +211,9 @@ def aoi_to_radar_window(
     bbox_wgs84: list[float],
     dem_file: str | Path,
     margin: int = 512,
-    az_looks: int = 16,
-    rg_looks: int = 7,
+    *,
+    az_looks: int,
+    rg_looks: int,
     rg_looks_b: int | None = None,
 ) -> dict[str, tuple[int, int]]:
     """Find the radar-coordinate crop window for ``bbox_wgs84`` in one RSLC.
@@ -315,7 +318,8 @@ def geocode_subset_box(
     xmin, ymin, xmax, ymax = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
 
     geocode = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['geocode']
-    if int(geocode['output_epsg']) != epsg_code:
+    # The fallback runconfig has no frame grid to snap to (output_epsg is blank).
+    if geocode['output_epsg'] is None or int(geocode['output_epsg']) != epsg_code:
         log.warning(
             'Subset EPSG %d != template geocode EPSG %s; skipping grid snap.', epsg_code, geocode['output_epsg']
         )
@@ -414,15 +418,6 @@ def _replace_identification_string(dst: h5py.File, identification_path: str, nam
     d = dst.create_dataset(path, data=np.bytes_(value))
     for k, v in attrs.items():
         d.attrs[k] = v
-
-
-def _set_bounding_polygon(dst: h5py.File, identification_path: str, wkt: str) -> None:
-    """Replace the (full-scene) identification boundingPolygon with the cropped footprint.
-
-    The GUNW writer copies this field straight from the reference RSLC, so leaving
-    the full-frame polygon would mislabel the cropped product's footprint.
-    """
-    _replace_identification_string(dst, identification_path, 'boundingPolygon', wkt)
 
 
 def _copy_except(src: h5py.Group, dst: h5py.Group, skip: set[str]) -> None:
@@ -555,7 +550,8 @@ def crop_rslc_from_handle(
         time_units = swath_t.attrs.get('units')
         if time_units is not None:
             _update_identification_times(dst, identification, time_units, az_lo, az_hi)
-        _set_bounding_polygon(dst, identification, _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi))
+        footprint = _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi)
+        _replace_identification_string(dst, identification, 'boundingPolygon', footprint)
         # A crop never covers the full frame; the InSAR writers copy this flag into every product.
         _replace_identification_string(dst, identification, 'isFullFrame', 'False')
     log.info('Wrote cropped RSLC: %s', dst_h5)
@@ -612,20 +608,11 @@ def write_skeleton(src: h5py.File, skeleton_h5: str | Path) -> Path:
 # readers need metadata, not pixels, to solve the window), then crop the window straight
 # from the remote handle. Output is byte-for-byte identical to a local crop.
 
-# CMR collection of the NISAR L1 RSLC granules (BETA, matching the rest of the pipeline).
-RSLC_SHORT_NAME = 'NISAR_L1_RSLC_BETA_V1'
-RSLC_SHORT_NAME_PROV = 'NISAR_L1_RSLC_PROVISIONAL_V1'
-
 
 def open_remote_rslc(scene_name: str) -> h5py.File:
     """Open a NISAR RSLC over byte-range as an h5py handle (no full download)."""
-    results = earthaccess.search_data(short_name=RSLC_SHORT_NAME, readable_granule_name=scene_name)
-    if len(results) == 0:
-        results = earthaccess.search_data(short_name=RSLC_SHORT_NAME_PROV, readable_granule_name=scene_name)
-        if len(results) == 0:
-            raise ValueError(f'No {RSLC_SHORT_NAME} or {RSLC_SHORT_NAME_PROV} granule found for {scene_name}')
     # earthaccess.open() handles auth + the S3/HTTPS redirect and block-caches reads.
-    fileobj = earthaccess.open(results[:1])[0]
+    fileobj = earthaccess.open([find_rslc(scene_name)])[0]
     return h5py.File(fileobj, 'r', driver='fileobj')
 
 
@@ -645,11 +632,12 @@ def crop_streamed(
     bbox_wgs84: list[float],
     dem_file: str | Path,
     margin: int = 512,
-    az_looks: int = 16,
-    rg_looks: int = 7,
+    *,
+    az_looks: int,
+    rg_looks: int,
     rg_looks_b: int | None = None,
 ) -> str:
-    """Solve the radar window from the skeleton, then stream-crop the window to ``<scene>_sub.h5``.
+    """Solve the radar window from the skeleton, then stream-crop the window to ``<scene>.h5``.
 
     Reopens the remote product (cheap; avoids holding a handle across the intervening
     ancillary downloads) and reads only the windowed image chunks. ``bbox_wgs84`` is
@@ -659,11 +647,15 @@ def crop_streamed(
     # Window + polarizations come from the local skeleton via the existing readers.
     slc = SLC(hdf5file=str(skeleton_path))
     try:
-        window = aoi_to_radar_window(slc, bbox_wgs84, dem_file, margin, az_looks, rg_looks, rg_looks_b)
+        window = aoi_to_radar_window(
+            slc, bbox_wgs84, dem_file, margin, az_looks=az_looks, rg_looks=rg_looks, rg_looks_b=rg_looks_b
+        )
     except (ValueError, RuntimeError) as e:
         raise ValueError(f'AOI does not fit the RSLC {scene_name}: {e}') from e
 
-    out_path = f'{scene_name}_sub.h5'
+    # Named as the granule itself: isce3 records the input file's name as the GUNW's
+    # l1*SlcGranules metadata, which should list the true RSLC granule.
+    out_path = f'{scene_name}.h5'
     with open_remote_rslc(scene_name) as remote:
         crop_rslc_from_handle(remote, out_path, window, get_polarizations(slc))
     return out_path
