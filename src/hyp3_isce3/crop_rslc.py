@@ -130,9 +130,9 @@ def _nested_band_window(
         side_window: (start, stop) on the side band, starting at the same slant range.
     """
     spacing_main = slant_main[1] - slant_main[0]
-    ratio = int(round((slant_side[1] - slant_side[0]) / spacing_main))
+    ratio = round((slant_side[1] - slant_side[0]) / spacing_main)
     # Main-band index of the side band's first sample.
-    offset = int(round((slant_side[0] - slant_main[0]) / spacing_main))
+    offset = round((slant_side[0] - slant_main[0]) / spacing_main)
     nested = (
         ratio >= 1 and 0 <= offset < len(slant_main) and abs(slant_main[offset] - slant_side[0]) < 1e-3 * spacing_main
     )
