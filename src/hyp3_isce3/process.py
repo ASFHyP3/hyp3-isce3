@@ -6,7 +6,7 @@ import logging
 import math
 import shutil
 import zipfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asf_search as asf
@@ -50,8 +50,8 @@ def decode_rslc_name(name: str) -> dict:
         'track': parts[5],
         'direction': parts[6],  # ascending/descending flag
         'frame': parts[7],
-        'start_time': datetime.strptime(parts[11], '%Y%m%dT%H%M%S'),  # acquisition start
-        'end_time': datetime.strptime(parts[12], '%Y%m%dT%H%M%S'),  # acquisition end
+        'start_time': datetime.strptime(parts[11], '%Y%m%dT%H%M%S').replace(tzinfo=UTC),  # acquisition start
+        'end_time': datetime.strptime(parts[12], '%Y%m%dT%H%M%S').replace(tzinfo=UTC),  # acquisition end
         'common': '_'.join(parts[5:11]),  # fields a compatible reference/secondary pair must share
         'dates': '_'.join(parts[11:13]),  # the start_end datetime tokens
         'center': '_'.join(parts[13:18]),  # trailing processing-center fields
@@ -301,7 +301,7 @@ def get_tropo(scene_name: str, subset: list[float] | None = None) -> str:
     """
     short_name = 'ASF_ECMWF_TROP'
     start_date = decode_rslc_name(scene_name)['start_time']
-    day = datetime(start_date.year, start_date.month, start_date.day)
+    day = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
     # ECMWF weather models are 6-hourly (00/06/12/18 UTC); round to the nearest one.
     if start_date.hour % 6 < 3:
         tropo_date = day + timedelta(hours=int(start_date.hour / 6) * 6)
