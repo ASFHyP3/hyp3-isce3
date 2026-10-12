@@ -1,0 +1,238 @@
+# Fallback GUNW runconfig, used only when no production GUNW exists on the requested frame.
+# Copied from the production runconfig of NISAR_L2_PR_GUNW_004_118_D_070_006_4000_SH_20251106T092752_20251106T092827_20251130T092753_20251130T092828_P05023_F_F_J_001
+# with the geocode and radar_grid_cubes output_epsg and corners blanked (they are frame-specific).
+#s3://nisar-static-repo/LSAR_PARAMETER_SET/05020/INSAR/NISAR_ParameterSet_INSAR_20000101_solid_earth_cpu_40_05_v0.1.yaml was used to generate this runconfig.
+runconfig:
+    name: NISAR_INSAR_RUNCONFIG
+    groups:
+        pge_name_group:
+            pge_name: INSAR_L_PGE
+        input_file_group:
+            reference_rslc_file: 
+                /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/NISAR_L1_PR_RSLC_004_118_D_070_4005_DHDH_A_20251106T092752_20251106T092827_P05023_N_F_J_001.h5
+            secondary_rslc_file: 
+                /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/NISAR_L1_PR_RSLC_006_118_D_070_4005_DHDH_A_20251130T092753_20251130T092828_P05023_F_F_J_001.h5
+            qa_gunw_input_file: output/product.h5
+        dynamic_ancillary_file_group:
+            dem_file: 
+                /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/dem.vrt
+            dem_file_description: Digital Elevation Model (DEM) for the 
+                NASA-ISRO NISAR mission, version 1.2, based on the Copernicus 
+                DEM 30-m (2023_1), referenced to the WGS84 ellipsoid. This 
+                digital elevation model (DEM) was prepared at the Jet Propulsion
+                Laboratory, California Institute of Technology, under contract 
+                with the National Aeronautics and Space Administration, using 
+                the Copernicus DEM 30-m COP-DEM_GLO-30-DGED/2023_1 model, 
+                provided by the European Space Agency (ESA). The Copernicus DEM 
+                30-m was produced using Copernicus WorldDEM-30  DLR e.V. 
+                2010-2014 and  Airbus Defence and Space GmbH 2014-2018 provided 
+                under COPERNICUS by the European Union and ESA; all rights 
+                reserved. The organizations in charge of the NISAR mission or 
+                the Copernicus programme by law or by delegation do not incur 
+                any liability for any use of the Copernicus WorldDEM-30. Users, 
+                including those who redistribute, adapt, modify, or combine the 
+                data contained in this DEM, must comply with the terms of the 
+                Copernicus DEM 30-m License Agreement. For additional 
+                information, please refer to https://doi.org/10.5067/NIDEM-1 and
+                https://doi.org/10.5270/ESA-c5d3d65.
+            water_mask_file: 
+                /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/WATERMASK.vrt
+            water_mask_file_description: 'Water Mask for the NASA-ISRO NISAR mission
+                version 0.5, derived through analysis and processing of multiple input
+                datasets, referenced to the WGS84 ellipsoid. Water mask derived at
+                the Jet Propulsion Laboratory, California Institute of Technology,
+                under contract with NASA, using multiple open datasets: JRC Global
+                Surface Water v1.3 (Pekel et al 2016, Nature 540, 418-422,  EC JRC/Google);
+                ESA WorldCover 10 m 2020 ( ESA WorldCover project 2020 / Contains
+                modified Copernicus Sentinel data (2020) processed by ESA WorldCover
+                consortium); OpenStreetMap Water Polygons ( OpenStreetMap contributors,
+                ODbL 1.0); MEaSUREs GIMP Mask v1 (Howat 2017, doi:10.5067/B8X58MQBFUPA;
+                Howat et al 2014). All trademarks and rights remain with their respective
+                owners; NISAR mission organizations assume no liability for use of
+                this product.'
+            orbit_files:
+                reference_orbit_file: 
+                    /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/NISAR_ANC_J_PR_MOE_20251107T131235_20251105T205942_20251107T025942.xml
+                secondary_orbit_file: 
+                    /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/NISAR_ANC_J_PR_MOE_20251202T032226_20251129T205942_20251201T025942.xml
+            troposphere_weather_model_files:
+        # ECMWF locations: reference: s3://nisar-ecmwf/preprocessed/20251106/A2A3/, secondary: s3://nisar-ecmwf/preprocessed/20251130/A2A3/
+                reference_troposphere_file: 
+                    /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/ECMWF_TROP_202511061200_202511061200_1.nc
+                secondary_troposphere_file: 
+                    /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/ECMWF_TROP_202511301200_202511301200_1.nc
+            tec_file: 
+                /data/work/jobs/2026/08/08/05/42/SCIFLO_INSAR__pcm_r05.02.2_pge_r05.02.3-network_pair_006_118_070_full_individual_L_40_DH_05_DH_0_state-config-20260808T053533.316536Z/NISAR_ANC_TEC_20251107T211843_20251105T230002_20251106T235952_s014.json
+        primary_executable:
+            product_type: GUNW
+            product_version:
+                rifg_version: 1.0.11
+                roff_version: 1.0.11
+                runw_version: 1.0.11
+                goff_version: 1.0.11
+                gunw_version: 1.0.11
+            product_doi:
+                rifg_doi: 10.5067/NIL1RIFG-P1
+                roff_doi: 10.5067/NIL1ROFF-P1
+                runw_doi: 10.5067/NIL1RUNW-P1
+                goff_doi: 10.5067/NIL2GOFF-P1
+                gunw_doi: 10.5067/NIL2GUNW-P1
+            composite_release_id: P05023
+            processing_type: PR
+            product_accuracy: F
+            urgent_request_id:
+            processing_center: J
+            static_layers_data_access: 
+                https://nisar-services.earthdata.nasa.gov/redirect/NISAR_L2_STATIC/{granule_id}.h5
+            partial_granule_id: 
+                NISAR_{Level}_PR_{ProductType}_004_118_D_070_006_{MODE}_{PO}_{RefStartDateTime}_{RefEndDateTime}_{SecStartDateTime}_{SecEndDateTime}_P05023_F_F_J_001
+        product_path_group:
+            product_path: output
+            scratch_path: scratch
+            sas_output_file: output/product.h5
+            product_counter: 1
+            qa_output_dir: qa_insar
+        debug_level_group:
+            debug_switch: false
+        processing:
+      #s3://nisar-static-repo/LSAR_PARAMETER_SET/05020/INSAR/NISAR_ParameterSet_INSAR_20000101_solid_earth_cpu_40_05_v0.1.yaml was used to generate this runconfig.
+      #s3://nisar-static-repo/PRODUCT_VERSION/NISAR_ProductVersion_20260629_v1.0.21.yaml is the location of the product version file.
+            input_subset:
+                list_of_frequencies:
+                    A: [HH]
+            dem_download:
+                source:
+                top_left:
+                    x:
+                    y:
+                bottom_right:
+                    x:
+                    y:
+            geocode:
+                output_epsg:
+                top_left:
+                    y_abs:
+                    x_abs:
+                bottom_right:
+                    y_abs:
+                    x_abs:
+                output_posting:
+                    A:
+                        x_posting: 80
+                        y_posting: 80
+                wrapped_interferogram:
+                    interp_method: BILINEAR
+                    output_posting:
+                        A:
+                            x_posting: 20
+                            y_posting: 20
+            radar_grid_cubes:
+                output_epsg:
+                output_posting:
+                    x_posting:
+                    y_posting:
+                top_left:
+                    y_abs:
+                    x_abs:
+                bottom_right:
+                    y_abs:
+                    x_abs:
+            troposphere_delay:
+                enabled: true
+                package: raider
+                weather_model_type: HRES
+                delay_direction: line_of_sight_mapping
+                enable_wet_product: true
+                enable_hydrostatic_product: true
+                enable_comb_product: false
+            ionosphere_phase_correction:
+                enabled: true
+                lines_per_block: 8000
+                spectral_diversity: main_diff_ms_band
+                dispersive_filter:
+                    filter_mask_type:
+                    - coherence
+                    - subswath_mask
+                    filter_coherence_threshold: 0.2
+                    kernel_range: 14
+                    kernel_azimuth: 110
+                    sigma_range: 4
+                    sigma_azimuth: 37
+                    filling_guide_median_size: 3
+                    filling_outlier_threshold: 3.5
+                    filling_outlier_min_scale: 0.0
+                    filling_outlier_mad_scale_factor: 1.4826
+            dense_offsets:
+                enabled: true
+                window_range: 64
+                window_azimuth: 96
+                half_search_range: 32
+                half_search_azimuth: 32
+                skip_range: 75
+                skip_azimuth: 75
+                correlation_surface_oversampling_factor: 16
+                deramping_method: complex
+            offsets_product:
+                enabled: false
+            rubbersheet:
+                enabled: true
+                polyfitting:
+                    enabled: true
+                    degree: 2
+                    critical_value: 0.1
+                    samples_along_range: 200
+                    samples_along_azimuth: 200
+            fine_resample:
+                enabled: true
+            crossmul:
+                range_looks: 5
+                azimuth_looks: 6
+            phase_unwrap:
+                range_looks: 13
+                azimuth_looks: 16
+                preprocess_wrapped_phase:
+                    enabled: true
+                    mask:
+                        mask_type: subswath_mask
+                bridge:
+                    enabled: true
+        worker:
+            internet_access: false
+            gpu_enabled: false
+            intermediate_files_removal_enabled: true
+        logging:
+            path: scratch/insar.log
+            write_mode: w
+        qa:
+            rifg:
+                qa_reports:
+                    browse:
+                        output_browse_latlon: true
+                    correlation_surface_peak:
+                        near_zero_threshold: -1
+                        zero_is_invalid: false
+            runw:
+                qa_reports:
+                    browse:
+                        output_browse_latlon: true
+                        rewrap: 2
+                    correlation_surface_peak:
+                        near_zero_threshold: -1
+                        zero_is_invalid: false
+            gunw:
+                qa_reports:
+                    browse:
+                        output_browse_latlon: true
+                        rewrap: 2
+                    correlation_surface_peak:
+                        near_zero_threshold: -1
+                        zero_is_invalid: false
+            roff:
+                qa_reports:
+                    browse:
+                        output_browse_latlon: true
+            goff:
+                qa_reports:
+                    browse:
+                        output_browse_latlon: true
+

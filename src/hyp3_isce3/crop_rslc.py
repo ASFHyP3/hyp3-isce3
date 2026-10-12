@@ -15,18 +15,28 @@ each acquisition's window comes from its own orbit. The crop is a plain integer
 padded slice -- no resampling.
 
 Cropped: only ``swaths`` -- ``zeroDopplerTime``, the ``frequency{A,B}`` images,
-their ``slantRange`` and ``validSamples``. These image axes are what isce3 reads
-to build the radar grid, so cropping them is what shrinks every radar-domain
-step. Restamped: ``identification/zeroDoppler{Start,End}Time`` and
-``identification/boundingPolygon`` (metadata the GUNW writer copies verbatim).
+their ``inputDataExceptionMask``, ``slantRange`` and ``validSamples``. These image
+axes are what isce3 reads to build the radar grid, so cropping them is what
+shrinks every radar-domain step. Restamped: ``identification/zeroDoppler{Start,End}Time``,
+``identification/boundingPolygon`` and ``identification/isFullFrame`` (metadata the
+InSAR writers copy verbatim). ``isFullFrame``'s ``frameCoveragePercentage`` attr and
+``hasInputDataException`` keep their full-frame values; neither drives processing.
 
-The window start is snapped down to a multiple of the InSAR multilook looks
-(azimuth lines, range samples). The interferogram is multilooked from the
-reference grid's first line/sample, so a crop whose origin is not on the look
-grid averages a shifted set of pixels versus a full-frame run. That is invisible
-in coherent ground (the look-cell average is smooth) but re-rolls the speckle
+The window start is snapped down to a multiple of every multilook grid: the
+crossmul looks (wrapped interferogram) and the phase_unwrap looks (unwrapped
+layers, and both bands in the ionosphere step). Each grid is multilooked from the
+reference grid's first line/sample, so a crop whose origin is not on a look grid
+averages a shifted set of pixels versus a full-frame run. That is invisible in
+coherent ground (the look-cell average is smooth) but re-rolls the speckle
 realization in decorrelated areas; snapping the origin makes the cropped product
 match a full-frame run there too.
+
+frequencyB's range window is derived from frequencyA's, not windowed on its own.
+The split-band ionosphere step never estimates frequencyB offsets: it decimates
+frequencyA's reference->secondary offsets onto the frequencyB grid, which is only
+valid when each RSLC's two bands start at the same slant range (as in the full
+frame). Windowing the bands independently gives each scene a different A-vs-B start
+shift, which misregisters frequencyB by over a resolution cell and decorrelates it.
 
 Everything else is copied verbatim: we crop only what the InSAR workflow consumes
 from the swath images. The radar-coordinate metadata grids
@@ -55,6 +65,8 @@ import numpy as np
 import yaml
 from nisar.products.readers import SLC
 from pyproj import Transformer
+
+from hyp3_isce3.search import find_rslc
 
 
 log = logging.getLogger(__name__)
@@ -95,6 +107,50 @@ def _snap_to_grid(value: float, step: float, origin: float = 0, expand_up: bool 
     """
     round_to_node = math.ceil if expand_up else math.floor
     return origin + round_to_node((value - origin) / step) * step
+
+
+def _nested_band_window(
+    slant_main: np.ndarray, slant_side: np.ndarray, p0: int, p1: int, looks_main: int, looks_side: int
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Range windows for a main band and a coarser side band that start at the same slant range.
+
+    The side band's samples must sit on every ``ratio``-th main-band sample. The main start is
+    floored to the nearest sample that is a multiple of ``looks_main`` and lands on a side-band
+    sample whose index is a multiple of ``looks_side``; the side window then ends inside the
+    main window, so isce3's main->side offset decimation needs no padding.
+
+    Args:
+        slant_main: Main-band (frequencyA) slantRange axis.
+        slant_side: Side-band (frequencyB) slantRange axis.
+        p0: Main-band window start before alignment.
+        p1: Main-band window stop (exclusive).
+        looks_main: Main-band range snap step; the main start is floored to a multiple of it.
+        looks_side: Side-band range looks; the side start is a multiple of it.
+
+    Returns:
+        main_window: Aligned (start, stop) on the main band.
+        side_window: (start, stop) on the side band, starting at the same slant range.
+    """
+    spacing_main = slant_main[1] - slant_main[0]
+    ratio = round((slant_side[1] - slant_side[0]) / spacing_main)
+    # Main-band index of the side band's first sample.
+    offset = round((slant_side[0] - slant_main[0]) / spacing_main)
+    nested = (
+        ratio >= 1 and 0 <= offset < len(slant_main) and abs(slant_main[offset] - slant_side[0]) < 1e-3 * spacing_main
+    )
+    if not nested or abs((slant_side[1] - slant_side[0]) - ratio * spacing_main) > 1e-6 * spacing_main:
+        raise ValueError('frequencyB samples are not on the frequencyA range grid; cannot align the band windows.')
+
+    # Walk the main start down to the first sample that is shared with the side band and on both look grids.
+    for start in range(p0, offset - 1, -1):
+        side_start, on_side = divmod(start - offset, ratio)
+        if on_side == 0 and start % looks_main == 0 and side_start % looks_side == 0:
+            break
+    else:
+        raise ValueError('No shared frequencyA/frequencyB range start at or below the window start.')
+    # Last side sample at or before the main window's last sample.
+    side_stop = min(len(slant_side), (p1 - 1 - offset) // ratio + 1)
+    return (start, p1), (side_start, side_stop)
 
 
 def _solve_aoi_corners(
@@ -155,8 +211,10 @@ def aoi_to_radar_window(
     bbox_wgs84: list[float],
     dem_file: str | Path,
     margin: int = 512,
-    az_looks: int = 16,
-    rg_looks: int = 7,
+    *,
+    az_looks: int,
+    rg_looks: int,
+    rg_looks_b: int | None = None,
 ) -> dict[str, tuple[int, int]]:
     """Find the radar-coordinate crop window for ``bbox_wgs84`` in one RSLC.
 
@@ -165,7 +223,8 @@ def aoi_to_radar_window(
     onto the swath axes. The window is independent per RSLC -- the AOI maps to
     different lines/pixels in each acquisition. The window start is snapped down to
     a multiple of the multilook looks so the crop's multilook cells line up with a
-    full-frame run (see module docstring). An AOI that overruns the swath is clamped
+    full-frame run, and frequencyB's range window starts at the same slant range as
+    frequencyA's (see module docstring). An AOI that overruns the swath is clamped
     to the overlap with a warning.
 
     Args:
@@ -173,12 +232,15 @@ def aoi_to_radar_window(
         bbox_wgs84: AOI bounding box [lon_min, lat_min, lon_max, lat_max] in WGS84 degrees.
         dem_file: Path of a DEM GeoTIFF in WGS84 (lon/lat) used for corner heights.
         margin: Padding in frequencyA samples / azimuth lines added on every side.
-        az_looks: Azimuth multilook looks; the window start line is floored to a multiple of it.
-        rg_looks: Range multilook looks; each frequency's window start sample is floored to a multiple of it.
+        az_looks: Azimuth snap step; the window start line is floored to a multiple of it.
+        rg_looks: frequencyA range snap step; its window start sample is floored to a multiple of it.
+        rg_looks_b: Range looks of the other bands (frequencyB); their start sample is a multiple
+            of it. Defaults to ``rg_looks``.
 
     Returns:
         window: Dict of {'az': (a0, a1), 'frequencyA': (p0, p1), ...} index slices.
     """
+    rg_looks_b = rg_looks if rg_looks_b is None else rg_looks_b
     # frequencyA radar grid supplies the wavelength and look side geo2rdr needs
     # (geometry is shared across frequencies, and frequencyA is always present).
     radar_grid = slc.getRadarGrid('A')
@@ -194,8 +256,8 @@ def aoi_to_radar_window(
 
     _check_epoch_alignment(radar_grid, swath_t)
 
-    # Shared azimuth window, plus an independent range window per frequency (each
-    # from its own slantRange axis covering the same physical AOI extent).
+    # Shared azimuth window, a frequencyA range window, and other bands' range windows
+    # derived from frequencyA's so every band starts at the same slant range.
     a_lo, a_hi = min(az_times), max(az_times)
     r_lo, r_hi = min(slant_ranges), max(slant_ranges)
     if (
@@ -206,12 +268,17 @@ def aoi_to_radar_window(
         log.warning('AOI extends past the swath of %s; cropping to the overlap.', Path(slc.filename).name)
 
     # Floor the window start to a multiple of the looks (multilook alignment; see module docstring).
-    # rg_looks is the single crossmul range looks, applied to every frequency's own grid.
     a0, a1 = _padded_slice(swath_t, a_lo, a_hi, margin)
     window = {'az': (int(_snap_to_grid(a0, az_looks)), a1)}
+    p0, p1 = _padded_slice(slant_axes['frequencyA'], r_lo, r_hi, margin)
+    window['frequencyA'] = (int(_snap_to_grid(p0, rg_looks)), p1)
     for fr in freq_groups:
-        p0, p1 = _padded_slice(slant_axes[fr], r_lo, r_hi, margin)
-        window[fr] = (int(_snap_to_grid(p0, rg_looks)), p1)
+        if fr == 'frequencyA':
+            continue
+        # Align this band's start with frequencyA's (moving frequencyA's start down if needed).
+        window['frequencyA'], window[fr] = _nested_band_window(
+            slant_axes['frequencyA'], slant_axes[fr], *window['frequencyA'], rg_looks, rg_looks_b
+        )
 
     a0, a1 = window['az']
     p0, p1 = window['frequencyA']
@@ -251,7 +318,8 @@ def geocode_subset_box(
     xmin, ymin, xmax, ymax = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max)
 
     geocode = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']['geocode']
-    if int(geocode['output_epsg']) != epsg_code:
+    # The fallback runconfig has no frame grid to snap to (output_epsg is blank).
+    if geocode['output_epsg'] is None or int(geocode['output_epsg']) != epsg_code:
         log.warning(
             'Subset EPSG %d != template geocode EPSG %s; skipping grid snap.', epsg_code, geocode['output_epsg']
         )
@@ -340,18 +408,14 @@ def _bounding_polygon_wkt(geoloc_grp: h5py.Group, az_lo: float, az_hi: float, rg
     return 'POLYGON ((' + ', '.join(f'{x:.6f} {y:.6f}' for x, y in pts) + '))'
 
 
-def _set_bounding_polygon(dst: h5py.File, identification_path: str, wkt: str) -> None:
-    """Replace the (full-scene) identification boundingPolygon with the cropped footprint.
-
-    The GUNW writer copies this field straight from the reference RSLC, so leaving
-    the full-frame polygon would mislabel the cropped product's footprint.
-    """
-    path = f'{identification_path}/boundingPolygon'
+def _replace_identification_string(dst: h5py.File, identification_path: str, name: str, value: str) -> None:
+    """Overwrite a string field in identification, keeping its attrs (the new value may change its length)."""
+    path = f'{identification_path}/{name}'
     if path not in dst:
         return
     attrs = dict(dst[path].attrs)  # capture before delete; the dataset is resized
     del dst[path]
-    d = dst.create_dataset(path, data=np.bytes_(wkt))
+    d = dst.create_dataset(path, data=np.bytes_(value))
     for k, v in attrs.items():
         d.attrs[k] = v
 
@@ -377,10 +441,11 @@ def _copy_except(src: h5py.Group, dst: h5py.Group, skip: set[str]) -> None:
 def _crop_frequency_group(
     src_fr: h5py.Group, dst_fr: h5py.Group, a0: int, a1: int, p0: int, p1: int, pols: list[str]
 ) -> None:
-    """Crop one ``frequency{A,B}`` subgroup: the pol images, ``slantRange``, and ``validSamples``."""
+    """Crop one ``frequency{A,B}`` subgroup: the pol images, exception mask, ``slantRange``, and ``validSamples``."""
     _copy_attrs(src_fr, dst_fr)
     for name, item in src_fr.items():
-        if name in pols:
+        # The exception mask is image-shaped; isce3 reads it at the same (line, sample) as the pixels.
+        if name in pols or name == 'inputDataExceptionMask':
             _copy_cropped(item, dst_fr, name, (slice(a0, a1), slice(p0, p1)))
         elif name == 'slantRange':
             _copy_cropped(item, dst_fr, name, (slice(p0, p1),))
@@ -485,7 +550,10 @@ def crop_rslc_from_handle(
         time_units = swath_t.attrs.get('units')
         if time_units is not None:
             _update_identification_times(dst, identification, time_units, az_lo, az_hi)
-        _set_bounding_polygon(dst, identification, _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi))
+        footprint = _bounding_polygon_wkt(src[geoloc], az_lo, az_hi, rg_lo, rg_hi)
+        _replace_identification_string(dst, identification, 'boundingPolygon', footprint)
+        # A crop never covers the full frame; the InSAR writers copy this flag into every product.
+        _replace_identification_string(dst, identification, 'isFullFrame', 'False')
     log.info('Wrote cropped RSLC: %s', dst_h5)
     return dst_h5
 
@@ -540,20 +608,11 @@ def write_skeleton(src: h5py.File, skeleton_h5: str | Path) -> Path:
 # readers need metadata, not pixels, to solve the window), then crop the window straight
 # from the remote handle. Output is byte-for-byte identical to a local crop.
 
-# CMR collection of the NISAR L1 RSLC granules (BETA, matching the rest of the pipeline).
-RSLC_SHORT_NAME = 'NISAR_L1_RSLC_BETA_V1'
-RSLC_SHORT_NAME_PROV = 'NISAR_L1_RSLC_PROVISIONAL_V1'
-
 
 def open_remote_rslc(scene_name: str) -> h5py.File:
     """Open a NISAR RSLC over byte-range as an h5py handle (no full download)."""
-    results = earthaccess.search_data(short_name=RSLC_SHORT_NAME, readable_granule_name=scene_name)
-    if len(results) == 0:
-        results = earthaccess.search_data(short_name=RSLC_SHORT_NAME_PROV, readable_granule_name=scene_name)
-        if len(results) == 0:
-            raise ValueError(f'No {RSLC_SHORT_NAME} or {RSLC_SHORT_NAME_PROV} granule found for {scene_name}')
     # earthaccess.open() handles auth + the S3/HTTPS redirect and block-caches reads.
-    fileobj = earthaccess.open(results[:1])[0]
+    fileobj = earthaccess.open([find_rslc(scene_name)])[0]
     return h5py.File(fileobj, 'r', driver='fileobj')
 
 
@@ -573,24 +632,30 @@ def crop_streamed(
     bbox_wgs84: list[float],
     dem_file: str | Path,
     margin: int = 512,
-    az_looks: int = 16,
-    rg_looks: int = 7,
+    *,
+    az_looks: int,
+    rg_looks: int,
+    rg_looks_b: int | None = None,
 ) -> str:
-    """Solve the radar window from the skeleton, then stream-crop the window to ``<scene>_sub.h5``.
+    """Solve the radar window from the skeleton, then stream-crop the window to ``<scene>.h5``.
 
     Reopens the remote product (cheap; avoids holding a handle across the intervening
     ancillary downloads) and reads only the windowed image chunks. ``bbox_wgs84`` is
-    [lon_min, lat_min, lon_max, lat_max]; ``margin``/``az_looks``/``rg_looks`` pass through
-    to :func:`aoi_to_radar_window`.
+    [lon_min, lat_min, lon_max, lat_max]; ``margin``/``az_looks``/``rg_looks``/``rg_looks_b``
+    pass through to :func:`aoi_to_radar_window`.
     """
     # Window + polarizations come from the local skeleton via the existing readers.
     slc = SLC(hdf5file=str(skeleton_path))
     try:
-        window = aoi_to_radar_window(slc, bbox_wgs84, dem_file, margin, az_looks, rg_looks)
+        window = aoi_to_radar_window(
+            slc, bbox_wgs84, dem_file, margin, az_looks=az_looks, rg_looks=rg_looks, rg_looks_b=rg_looks_b
+        )
     except (ValueError, RuntimeError) as e:
         raise ValueError(f'AOI does not fit the RSLC {scene_name}: {e}') from e
 
-    out_path = f'{scene_name}_sub.h5'
+    # Named as the granule itself: isce3 records the input file's name as the GUNW's
+    # l1*SlcGranules metadata, which should list the true RSLC granule.
+    out_path = f'{scene_name}.h5'
     with open_remote_rslc(scene_name) as remote:
         crop_rslc_from_handle(remote, out_path, window, get_polarizations(slc))
     return out_path
