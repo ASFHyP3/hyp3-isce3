@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [PEP 440](https://www.python.org/dev/peps/pep-0440/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+### Added
+- `schemas/gunw_fallback.yaml`, a production GUNW runconfig (40+5 MHz parameter set) with its frame-specific output grid blanked. It is used when no production GUNW exists on the requested frame; the output projection is then the scene's UTM zone and isce3 sizes the grid from the RSLC.
+
+### Changed
+- `--subset` products set the GUNW name's coverage field to `P` (partial frame), matching `identification/isFullFrame`.
+- The isce3 runconfig is now built from the production GUNW runconfig itself, replacing values only where our run differs (input/ancillary paths, output locations, ASF on-demand identity, subset grid). Products now carry production's composite release ID, product versions, and DOIs, and a granule ID for the actual pair (previously a stale example identity, e.g. `009_044_D_059_010`, `X05010`, BETA DOIs).
+- Output products are named by the granule ID isce3 writes into the GUNW, following the NISAR GUNW filename convention (e.g. `..._005_019_A_011_006_4000_SH_..._P05023_N_F_A_001`).
+- Each pair is processed in its own `./<product_id>/` working directory; `process_isce3` returns the absolute path of the zip inside it.
+- NISAR RSLC and GUNW lookups search the PROVISIONAL, BETA, and operational collections through one shared `hyp3_isce3.search` module; full RSLC downloads now use earthaccess like streaming.
+- Cropped RSLCs are named as their granule (`<scene>.h5`), so the GUNW's input granule metadata lists the true RSLC names.
+- `aoi_to_radar_window` and `crop_streamed` now require `az_looks` and `rg_looks` as keyword arguments (`rg_looks_b` stays optional).
+
+### Fixed
+- `get_dem` mosaics only the EPSG:4326 NISAR DEM tiles. Near the poles the search also returns polar-stereographic (EPSG:3413/3031) copies of the same DEM, which `gdalbuildvrt` cannot mix, leaving a polar mosaic of the wrong extent (a 177 GB warp for an Iceland AOI).
+- The GUNW product ID relabels only the producer field (`J` -> `A`), not every `J` in the trailing fields.
+- The reference/secondary pair is ordered by parsed acquisition time inside `process_isce3`.
+
+### Removed
+- `schemas/insar.yaml` (the runconfig header template).
+
 ## [0.3.1]
 
 ### Changed
