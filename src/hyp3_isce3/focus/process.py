@@ -1,0 +1,165 @@
+"""Focus a NISAR L0B into an RSLC on a GPU with the isce3 focus workflow."""
+
+import argparse
+import contextlib
+import logging
+import zipfile
+from pathlib import Path
+
+import earthaccess
+import h5py
+import shapely
+import yaml
+from hyp3lib.aws import upload_file_to_s3
+from nisar.workflows import focus as nisar_focus
+
+from hyp3_isce3.dem import get_dem
+from hyp3_isce3.focus.ancillary import download_latest_ancillaries, download_named_ancillaries
+from hyp3_isce3.focus.inputs import decode_l0b_name, download_l0b, find_l0b, get_template, l0b_footprint
+
+
+log = logging.getLogger(__name__)
+
+
+def get_config(template_yaml: Path, l0b_paths: list[str], ancillaries: dict, dem_path: str) -> Path:
+    """Create the focus runconfig from a production (or fallback) RSLC runconfig.
+
+    The template supplies every processing setting, the frame geometry and output times, and the
+    release metadata. Only the fields that differ for our run are overwritten: input and ancillary
+    paths, output locations, the ASF on-demand identity, and the GPU switch.
+
+    Args:
+        template_yaml: Path of the runconfig template (from :func:`get_template`).
+        l0b_paths: Local paths of the L0B files, in the template's order.
+        ancillaries: Local path of each ancillary file, keyed by runconfig field.
+        dem_path: Path of the DEM file.
+
+    Returns:
+        yaml_file: Path of the configuration file.
+    """
+    runconfig = yaml.safe_load(Path(template_yaml).read_text())
+    groups = runconfig['runconfig']['groups']
+
+    # Rebuild the input and ancillary groups from our files so none of production's job-local
+    # paths can leak through; only the ancillary descriptions are carried over.
+    groups['input_file_group'] = {'input_file_path': l0b_paths, 'qa_input_file': 'output/rslc.h5'}
+    descriptions = {
+        key: value
+        for key, value in groups.get('dynamic_ancillary_file_group', {}).items()
+        if key.endswith('_description')
+    }
+    groups['dynamic_ancillary_file_group'] = {'dem_file': dem_path, **ancillaries, **descriptions}
+    groups['product_path_group'] = {
+        'product_path': 'output',
+        'scratch_path': 'scratch',
+        'sas_output_file': 'output/rslc.h5',
+        'sas_config_file': None,
+        'product_counter': 1,
+        'qa_output_dir': 'output',
+    }
+
+    # Keep production's CRID, product version, and DOI; label the product as ASF on-demand.
+    executable = groups['primary_executable']
+    executable['processing_type'] = 'OD'
+    executable['processing_center'] = 'A'
+    # Relabel the granule ID's processing type (field 2, 'PR') and producer (second-to-last field, 'J').
+    fields = executable['partial_granule_id'].split('_')
+    fields[2], fields[-2] = 'OD', 'A'
+    executable['partial_granule_id'] = '_'.join(fields)
+
+    # isce3 raises if no CUDA device is found, so a job landing on a CPU node fails immediately.
+    groups['worker'] = {'gpu_enabled': True, 'gpu_id': 0}
+
+    yaml_file = Path('focus.yaml')
+    yaml_file.write_text(yaml.safe_dump(runconfig, sort_keys=False))
+    return yaml_file
+
+
+def process_focus(l0b_name: str, frame: int) -> Path:
+    """Focus one frame of an L0B into an RSLC.
+
+    Everything is staged and processed in a folder named for the L0B and frame, so several runs
+    in one working directory don't overwrite each other's files.
+
+    Args:
+        l0b_name: Name of the L0B granule.
+        frame: Frame number to focus.
+
+    Returns:
+        zip_path: Absolute path of the zip holding the RSLC h5 file and its runconfig.
+    """
+    run_dir = Path(f'{l0b_name}_F{frame:03d}').resolve()
+    run_dir.mkdir(exist_ok=True)
+    with contextlib.chdir(run_dir):
+        zip_name = _run_focus(l0b_name, frame)
+    return run_dir / zip_name
+
+
+def _run_focus(l0b_name: str, frame: int) -> str:
+    """Stage the inputs, run the isce3 focus, and zip the RSLC, all in the current directory.
+
+    Args:
+        l0b_name: Name of the L0B granule.
+        frame: Frame number to focus.
+
+    Returns:
+        zip_name: File name of the zip holding the RSLC h5 file and its runconfig.
+    """
+    earthaccess.login()
+    template_yaml, is_production = get_template(l0b_name, frame)
+    groups = yaml.safe_load(template_yaml.read_text())['runconfig']['groups']
+
+    # A production frame can span two L0Bs; fetch every one its runconfig lists.
+    l0b_names = [Path(p).stem for p in groups['input_file_group']['input_file_path']]
+    l0b_granules = [find_l0b(name) for name in l0b_names]
+    l0b_paths = [download_l0b(granule) for granule in l0b_granules]
+    log.info(f'Downloaded L0B: {[Path(p).name for p in l0b_paths]}')
+
+    if is_production:
+        ancillaries = download_named_ancillaries(groups['dynamic_ancillary_file_group'])
+    else:
+        l0b = decode_l0b_name(l0b_name)
+        ancillaries = download_latest_ancillaries(l0b['start_time'], l0b['end_time'])
+
+    # The DEM must cover the focused swath: the L0B footprints, trimmed to the frame when focusing only the frame.
+    footprint = shapely.union_all([l0b_footprint(granule) for granule in l0b_granules])
+    if is_production:
+        footprint = footprint.intersection(shapely.from_geojson(groups['geometry']['track_frame_polygon']))
+    # get_dem reads only the bounding box when one is given (the path argument is not used then).
+    dem_path = get_dem(l0b_paths[0], subset=list(footprint.bounds))
+
+    yaml_path = get_config(template_yaml, l0b_paths, ancillaries, dem_path)
+    template_yaml.unlink()  # consumed by the input lookups and the config build
+
+    log.info('Running the isce3 focus workflow on the GPU')
+    nisar_focus.focus(nisar_focus.load_config(str(yaml_path)), str(yaml_path))
+
+    output = Path('output/rslc.h5')
+    if not output.exists():
+        raise RuntimeError('The RSLC file was not written!')
+    # Name the product by the granule ID isce3 wrote into it (mode, polarization, and times filled in).
+    with h5py.File(output, 'r') as rslc:
+        band = next(iter(rslc['science']))
+        granule_id = rslc[f'science/{band}/identification/granuleId'][()].decode()
+    output = output.rename(f'{granule_id}.h5')
+    yaml_path = yaml_path.rename(f'{granule_id}.rc.yaml')
+
+    with zipfile.ZipFile(f'{granule_id}.zip', 'w', zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.write(str(output))
+        zip_ref.write(str(yaml_path))
+    return f'{granule_id}.zip'
+
+
+def main() -> None:
+    """Entrypoint for the L0B focus workflow (++process focus_l0b)."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--bucket', help='AWS S3 bucket HyP3 for upload the final product(s)')
+    parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
+    parser.add_argument('granule', help='NISAR L0B (RRSD) granule name')
+    parser.add_argument('--frame', type=int, required=True, help='NISAR frame number to focus')
+    args = parser.parse_args()
+
+    product_file = process_focus(args.granule, args.frame)
+
+    if args.bucket:
+        upload_file_to_s3(product_file, args.bucket, args.bucket_prefix)
