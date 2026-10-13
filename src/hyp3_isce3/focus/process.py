@@ -4,13 +4,18 @@ import argparse
 import contextlib
 import logging
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import earthaccess
 import h5py
+import isce3
+import numpy as np
 import shapely
 import yaml
 from hyp3lib.aws import upload_file_to_s3
+from nisar.products.readers.Raw import open_rrsd
+from nisar.products.readers.orbit import load_orbit_from_xml
 from nisar.workflows import focus as nisar_focus
 
 from hyp3_isce3.dem import get_dem
@@ -75,6 +80,43 @@ def get_config(template_yaml: Path, l0b_paths: list[str], ancillaries: dict, dem
     return yaml_file
 
 
+def get_frame_times(l0b_path: str, orbit_path: str, track_frame_polygon: str) -> tuple[datetime, datetime]:
+    """Find the zero-Doppler time span of a frame polygon, to cut the focus output to that frame.
+
+    Each polygon vertex (on the ellipsoid) is projected to radar time with geo2rdr; the frame spans
+    the earliest to the latest vertex time. On production frames this lands within 1 s of the
+    production output_grid times, which are whole seconds.
+
+    Args:
+        l0b_path: Path of the L0B file.
+        orbit_path: Path of the orbit XML file.
+        track_frame_polygon: Frame polygon as GeoJSON.
+
+    Returns:
+        start_time: Zero-Doppler time of the frame's first line (UTC).
+        end_time: Zero-Doppler time of the frame's last line (UTC).
+    """
+    raw = open_rrsd(l0b_path)
+    wavelength = isce3.core.speed_of_light / raw.getCenterFrequency(raw.frequencies[0])
+    side = raw.identification.lookDirection
+    # Crop the orbit to the L0B's span, so geo2rdr's search starts on this pass of a multi-pass orbit file.
+    l0b = decode_l0b_name(Path(l0b_path).stem)
+    orbit = load_orbit_from_xml(orbit_path)
+    orbit = orbit.crop(isce3.core.DateTime(l0b['start_time']), isce3.core.DateTime(l0b['end_time']), 3)
+
+    times = []
+    for lon, lat in shapely.get_coordinates(shapely.from_geojson(track_frame_polygon)):
+        llh = np.array([np.radians(lon), np.radians(lat), 0.0])
+        t, _ = isce3.geometry.geo2rdr(llh, isce3.core.Ellipsoid(), orbit, isce3.core.LUT2d(), wavelength, side)
+        times.append(t)
+
+    # Orbit times are seconds since its reference epoch; isce3 prints nanoseconds, Python keeps microseconds.
+    epoch = datetime.fromisoformat(orbit.reference_epoch.isoformat()[:26]).replace(tzinfo=UTC)
+    start_time, end_time = epoch + timedelta(seconds=min(times)), epoch + timedelta(seconds=max(times))
+    log.info(f'Frame zero-Doppler span from the frame polygon: {start_time} to {end_time}')
+    return start_time, end_time
+
+
 def process_focus(l0b_name: str, frame: int) -> Path:
     """Focus one frame of an L0B into an RSLC.
 
@@ -120,11 +162,19 @@ def _run_focus(l0b_name: str, frame: int) -> str:
     else:
         l0b = decode_l0b_name(l0b_name)
         ancillaries = download_latest_ancillaries(l0b['start_time'], l0b['end_time'])
+        # The fallback's output times are blank (the whole L0B); cut the output to the frame instead.
+        start_time, end_time = get_frame_times(
+            l0b_paths[0], ancillaries['orbit'], groups['geometry']['track_frame_polygon']
+        )
+        runconfig = yaml.safe_load(template_yaml.read_text())
+        runconfig['runconfig']['groups']['processing']['output_grid'].update(
+            {'start_time': start_time, 'end_time': end_time}
+        )
+        template_yaml.write_text(yaml.safe_dump(runconfig, sort_keys=False))
 
-    # The DEM must cover the focused swath: the L0B footprints, trimmed to the frame when focusing only the frame.
+    # The DEM must cover the focused swath: the L0B footprints, trimmed to the frame.
     footprint = shapely.union_all([l0b_footprint(granule) for granule in l0b_granules])
-    if is_production:
-        footprint = footprint.intersection(shapely.from_geojson(groups['geometry']['track_frame_polygon']))
+    footprint = footprint.intersection(shapely.from_geojson(groups['geometry']['track_frame_polygon']))
     # get_dem reads only the bounding box when one is given (the path argument is not used then).
     dem_path = get_dem(l0b_paths[0], subset=list(footprint.bounds))
 
