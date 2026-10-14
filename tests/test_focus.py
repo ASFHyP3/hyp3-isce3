@@ -3,11 +3,13 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 import yaml
+from nisar.mixed_mode import PolChannelSet
 
 import hyp3_isce3
 from hyp3_isce3.focus import inputs
-from hyp3_isce3.focus.process import get_config
+from hyp3_isce3.focus.process import get_config, only_polarizations
 
 
 L0B = 'NISAR_L0_PR_RRSD_032_128_D_161S_20261009T021028_20261009T021116_P05023_F_J_001'
@@ -79,3 +81,32 @@ def test_get_template_fallback(tmp_path, monkeypatch):
     # The whole L0B is focused, so the frame-specific output times stay blank.
     assert groups['processing']['output_grid']['start_time'] is None
     assert groups['processing']['output_grid']['end_time'] is None
+
+
+class FakeRaw:
+    """Stands in for an L0B reader: dual-pol HH/HV in both frequencies, as on the T120 L0Bs."""
+
+    polarizations = {'A': ['HH', 'HV'], 'B': ['HH', 'HV']}
+
+    def getChirpParameters(self, freq_id, tx):
+        # center frequency, sample rate, chirp slope, duration: 20 MHz on A, 5 MHz on B
+        return (1.2575e9, 24e6, 20e6 / 40e-6, 40e-6) if freq_id == 'A' else (1.2875e9, 6e6, 5e6 / 40e-6, 40e-6)
+
+
+def test_only_polarizations_keeps_hh_in_both_frequencies():
+    with only_polarizations(['HH']):
+        mode = PolChannelSet.from_raw(FakeRaw())
+    assert sorted((c.freq_id, c.pol) for c in mode) == [('A', 'HH'), ('B', 'HH')]
+    # the original reader comes back after the focus
+    assert len(PolChannelSet.from_raw(FakeRaw())) == 4
+
+
+def test_only_polarizations_none_keeps_everything():
+    with only_polarizations(None):
+        assert len(PolChannelSet.from_raw(FakeRaw())) == 4
+
+
+def test_only_polarizations_missing_pol_raises():
+    with only_polarizations(['VV']), pytest.raises(ValueError, match='VV'):
+        PolChannelSet.from_raw(FakeRaw())
+    assert len(PolChannelSet.from_raw(FakeRaw())) == 4

@@ -10,6 +10,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - Focusing a NISAR L0B to an RSLC on a GPU: `++process focus_l0b <L0B granule> --frame <frame>` (new `hyp3_isce3.focus` package). The runconfig is built from the production RSLC's own runconfig for that L0B and frame when one exists, with the same named ancillary files; otherwise `schemas/rslc_fallback.yaml` is filled from the track-frame database and the newest orbit, pointing, and calibration files, and the output is cut to the frame's zero-Doppler span.
+- `focus_l0b --polarizations HH` focuses only the named polarizations (in every frequency the L0B carries), for RSLCs that only feed a GUNW; the product's polarization code and mixed-mode flag follow the focused channels.
 - `Dockerfile.gpu` and a `gpu` pixi environment with conda-forge's CUDA build of isce3 for the focus workflow.
 - `python -m hyp3_isce3` now dispatches on `++process` (`gunw`, the default, or `focus_l0b`), passing the remaining arguments to that workflow's parser.
 - `schemas/gunw_fallback.yaml`, a production GUNW runconfig (40+5 MHz parameter set) with its frame-specific output grid blanked. It is used when no production GUNW exists on the requested frame; the output projection is then the scene's UTM zone and isce3 sizes the grid from the RSLC.
