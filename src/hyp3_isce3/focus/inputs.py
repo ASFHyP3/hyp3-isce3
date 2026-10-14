@@ -82,8 +82,10 @@ def find_production_runconfig(l0b_name: str, frame: int) -> Path | None:
     for granule in results:
         rslc_name = granule['umm']['GranuleUR']
         yaml_url = asf.granule_search(rslc_name).find_urls(pattern=r'\.rc\.yaml')[0]
-        asf.download_url(url=yaml_url, path='./', filename='temp.yaml')
         template = Path('temp.yaml')
+        # asf_search skips the download if the file exists, so clear any leftover from a crashed run.
+        template.unlink(missing_ok=True)
+        asf.download_url(url=yaml_url, path='./', filename=template.name)
         # An RSLC frame can span two L0Bs; keep this runconfig only if the requested L0B is among its inputs.
         groups = yaml.safe_load(template.read_text())['runconfig']['groups']
         inputs = [Path(p).stem for p in groups['input_file_group']['input_file_path']]

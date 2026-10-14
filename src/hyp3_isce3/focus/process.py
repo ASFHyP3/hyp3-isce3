@@ -18,7 +18,7 @@ from nisar.products.readers.Raw import open_rrsd
 from nisar.products.readers.orbit import load_orbit_from_xml
 from nisar.workflows import focus as nisar_focus
 
-from hyp3_isce3.dem import get_dem
+from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.focus.ancillary import download_latest_ancillaries, download_named_ancillaries
 from hyp3_isce3.focus.inputs import decode_l0b_name, download_l0b, find_l0b, get_template, l0b_footprint
 
@@ -85,7 +85,8 @@ def get_frame_times(l0b_path: str, orbit_path: str, track_frame_polygon: str) ->
 
     Each polygon vertex (on the ellipsoid) is projected to radar time with geo2rdr; the frame spans
     the earliest to the latest vertex time. On production frames this lands within 1 s of the
-    production output_grid times, which are whole seconds.
+    production output_grid times, which are whole seconds. A frame can extend past the L0B (production
+    then focuses it from two L0Bs); the span is cut to the L0B's pulses, so the RSLC is partial.
 
     Args:
         l0b_path: Path of the L0B file.
@@ -99,20 +100,31 @@ def get_frame_times(l0b_path: str, orbit_path: str, track_frame_polygon: str) ->
     raw = open_rrsd(l0b_path)
     wavelength = isce3.core.speed_of_light / raw.getCenterFrequency(raw.frequencies[0])
     side = raw.identification.lookDirection
-    # Crop the orbit to the L0B's span, so geo2rdr's search starts on this pass of a multi-pass orbit file.
+    # Crop the orbit to the L0B's span, so geo2rdr's search starts on this pass of a multi-pass orbit
+    # file. The margin keeps vertices of a frame that extends past the L0B inside the orbit.
     l0b = decode_l0b_name(Path(l0b_path).stem)
+    margin = timedelta(seconds=60)
     orbit = load_orbit_from_xml(orbit_path)
-    orbit = orbit.crop(isce3.core.DateTime(l0b['start_time']), isce3.core.DateTime(l0b['end_time']), 3)
+    orbit = orbit.crop(
+        isce3.core.DateTime(l0b['start_time'] - margin), isce3.core.DateTime(l0b['end_time'] + margin), 3
+    )
 
     times = []
     for lon, lat in shapely.get_coordinates(shapely.from_geojson(track_frame_polygon)):
         llh = np.array([np.radians(lon), np.radians(lat), 0.0])
         t, _ = isce3.geometry.geo2rdr(llh, isce3.core.Ellipsoid(), orbit, isce3.core.LUT2d(), wavelength, side)
         times.append(t)
+    start, end = min(times), max(times)
+
+    # Cut the span to the pulses this L0B holds; the frame may continue into the neighboring L0B.
+    _, pulse_times = raw.getPulseTimes(epoch=orbit.reference_epoch)
+    if start < pulse_times[0] or end > pulse_times[-1]:
+        log.warning('The frame extends past this L0B; the RSLC covers only the part of the frame it holds.')
+        start, end = max(start, pulse_times[0]), min(end, pulse_times[-1])
 
     # Orbit times are seconds since its reference epoch; isce3 prints nanoseconds, Python keeps microseconds.
     epoch = datetime.fromisoformat(orbit.reference_epoch.isoformat()[:26]).replace(tzinfo=UTC)
-    start_time, end_time = epoch + timedelta(seconds=min(times)), epoch + timedelta(seconds=max(times))
+    start_time, end_time = epoch + timedelta(seconds=start), epoch + timedelta(seconds=end)
     log.info(f'Frame zero-Doppler span from the frame polygon: {start_time} to {end_time}')
     return start_time, end_time
 
@@ -175,8 +187,8 @@ def _run_focus(l0b_name: str, frame: int) -> str:
     # The DEM must cover the focused swath: the L0B footprints, trimmed to the frame.
     footprint = shapely.union_all([l0b_footprint(granule) for granule in l0b_granules])
     footprint = footprint.intersection(shapely.from_geojson(groups['geometry']['track_frame_polygon']))
-    # get_dem reads only the bounding box when one is given (the path argument is not used then).
-    dem_path = get_dem(l0b_paths[0], subset=list(footprint.bounds))
+    # mosaic_tiles reads only the bounding box when one is given (the path argument is not used then).
+    dem_path = mosaic_tiles('NISAR_DEM', l0b_paths[0], list(footprint.bounds), 'dem.tif')
 
     yaml_path = get_config(template_yaml, l0b_paths, ancillaries, dem_path)
     template_yaml.unlink()  # consumed by the input lookups and the config build

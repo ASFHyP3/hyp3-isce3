@@ -18,12 +18,11 @@ import yaml
 from hyp3lib.aws import upload_file_to_s3
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
-from osgeo import gdal
 
 import hyp3_isce3
 from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
 from hyp3_isce3.crop_tropo import crop_tropo
-from hyp3_isce3.dem import get_dem
+from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.search import find_rslc, search_nisar
 
 
@@ -352,85 +351,22 @@ def get_tec(scene_name: str) -> str:
     return str(files[-1])
 
 
-def get_watermask(reference_path: str, subset: list[float] | None = None) -> str:
-    """Download files to apply watermasking.
+def get_epsg_code(reference_path: str) -> int:
+    """Get the UTM EPSG code of the full reference scene.
 
-    Args:
-        reference_path: Path of the reference scene.
-        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the mask
-            is fetched over the AOI instead of the whole frame (the 1-degree buffer
-            below covers the crop margin).
-
-    Returns:
-        watermask_path: Path of the water mask file.
-    """
-    short_name = 'NISAR_WATERMASK'
-    if subset:
-        bbox = tuple(subset)
-    else:
-        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
-        bbox = poly.bounds
-    buf = 1.0  # degrees padded around the AOI or frame so the mosaic covers the crop margin
-    bbox = (bbox[0] - buf, bbox[1] - buf, bbox[2] + buf, bbox[3] + buf)
-    results = earthaccess.search_data(short_name=short_name, bounding_box=bbox)
-    files = sorted(earthaccess.download(results))
-    folder = files[0].parent
-    files = [f.resolve() for f in files if '.tif' in f.name]
-
-    output_raster = folder / 'watermask.tif'
-    vrt_dataset = gdal.BuildVRT(str(folder / 'mosaic.vrt'), files)
-    vrt_dataset = None
-    vrt_dataset = folder / 'mosaic.vrt'
-    # gdal.Warp(str(output_raster), vrt_dataset, dstSRS="EPSG:4326")
-    gdal.Warp(str(output_raster), vrt_dataset)
-
-    if output_raster.exists():
-        return str(output_raster)
-    else:
-        raise RuntimeError('watermask could not be downloaded')
-
-
-def get_epsg(lat: float, lon: float) -> int:
-    """Get the UTM EPSG code for a latitude/longitude point.
-
-    Args:
-        lat: Latitude coordinate of the centroid.
-        lon: Longitude coordinate of the centroid.
-
-    Returns:
-        epsg_code: EPSG code for the polygon projection.
-    """
-    _, _, zone_number, zone_letter = utm.from_latlon(lat, lon)
-
-    is_northern = zone_letter >= 'N'
-
-    epsg_base = 32600 if is_northern else 32700
-    return epsg_base + zone_number
-
-
-def get_epsg_code(reference_path: str, subset: list[float] | None = None) -> int:
-    """Get Polygon for reference scene.
+    The zone is always taken from the whole frame, never a subset: the subset's geocode box is
+    snapped onto the full-frame grid, which only works in the frame's projection.
 
     Args:
         reference_path: Path of the reference scene (full product or skeleton).
-        subset: Optional AOI [lon_min, lat_min, lon_max, lat_max]; when set, the DEM is
-            staged over the AOI (plus a buffer for the crop margin and radar-processing
-            edges) instead of the whole frame. EPSG is still taken from the full scene.
 
     Returns:
         epsg_code: UTM EPSG code of the full scene's centroid.
     """
-    if subset:
-        # Buffer the AOI past the 512-px crop margin's ground extent (~5-6 km); the
-        # extra apply_margin_to_geographic_box 5 km below then adds further headroom.
-        buf = 0.1  # degrees (~11 km)
-        bbox = [subset[0] - buf, subset[1] - buf, subset[2] + buf, subset[3] + buf]
-        poly, _ = stage_dem.determine_polygon(reference_path, bbox=bbox, bbox_epsg='4326')
-    else:
-        poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
-    epsg_code = get_epsg(poly.centroid.y, poly.centroid.x)
-
-    return epsg_code
+    poly, _ = stage_dem.determine_polygon(reference_path, bbox=None, bbox_epsg='4326')
+    _, _, zone_number, zone_letter = utm.from_latlon(poly.centroid.y, poly.centroid.x)
+    epsg_base = 32600 if zone_letter >= 'N' else 32700  # northern vs southern hemisphere
+    return epsg_base + zone_number
 
 
 def get_product_id(reference_scene: str, secondary_scene: str) -> str:
@@ -516,7 +452,7 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
 
     # When subsetting, stage the water mask, weather models, and DEM over the AOI only
     # (orbit/tec are temporal, so they are unaffected by the subset).
-    watermask = get_watermask(reference_path, subset)
+    watermask = mosaic_tiles('NISAR_WATERMASK', reference_path, subset, 'watermask.tif')
 
     reference_orbit = get_orbit(reference_scene)
     secondary_orbit = get_orbit(secondary_scene)
@@ -526,8 +462,8 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
 
     tec_path = get_tec(reference_scene)
 
-    epsg_code = get_epsg_code(reference_path, subset)
-    dem_path = get_dem(reference_path, subset)
+    epsg_code = get_epsg_code(reference_path)
+    dem_path = mosaic_tiles('NISAR_DEM', reference_path, subset, 'dem.tif')
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # multilook looks the crop aligns to; download once and reuse for both.

@@ -9,6 +9,9 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.4.0]
 
 ### Added
+- Focusing a NISAR L0B to an RSLC on a GPU: `++process focus_l0b <L0B granule> --frame <frame>` (new `hyp3_isce3.focus` package). The runconfig is built from the production RSLC's own runconfig for that L0B and frame when one exists, with the same named ancillary files; otherwise `schemas/rslc_fallback.yaml` is filled from the track-frame database and the newest orbit, pointing, and calibration files, and the output is cut to the frame's zero-Doppler span.
+- `Dockerfile.gpu` and a `gpu` pixi environment with conda-forge's CUDA build of isce3 for the focus workflow.
+- `python -m hyp3_isce3` now dispatches on `++process` (`gunw`, the default, or `focus_l0b`), passing the remaining arguments to that workflow's parser.
 - `schemas/gunw_fallback.yaml`, a production GUNW runconfig (40+5 MHz parameter set) with its frame-specific output grid blanked. It is used when no production GUNW exists on the requested frame; the output projection is then the scene's UTM zone and isce3 sizes the grid from the RSLC.
 
 ### Changed
@@ -21,7 +24,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `aoi_to_radar_window` and `crop_streamed` now require `az_looks` and `rg_looks` as keyword arguments (`rg_looks_b` stays optional).
 
 ### Fixed
-- `get_dem` mosaics only the EPSG:4326 NISAR DEM tiles. Near the poles the search also returns polar-stereographic (EPSG:3413/3031) copies of the same DEM, which `gdalbuildvrt` cannot mix, leaving a polar mosaic of the wrong extent (a 177 GB warp for an Iceland AOI).
+- `mosaic_tiles` (the DEM and water mask download) mosaics only the EPSG:4326 NISAR tiles. Near the poles the search also returns polar-stereographic (EPSG:3413/3031) copies of the same DEM, which `gdalbuildvrt` cannot mix, leaving a polar mosaic of the wrong extent (a 177 GB warp for an Iceland AOI).
 - The GUNW product ID relabels only the producer field (`J` -> `A`), not every `J` in the trailing fields.
 - The reference/secondary pair is ordered by parsed acquisition time inside `process_isce3`.
 
