@@ -1,0 +1,132 @@
+# Fallback RSLC runconfig, used only when no production RSLC was focused from the requested L0B on the requested frame.
+# Copied from the production runconfig of NISAR_L1_PR_RSLC_032_128_D_076_0005_NADV_A_20261009T021032_20261009T021039_P05023_N_P_J_001
+# with the output_grid start_time and end_time blanked (they are frame-specific), so the whole L0B is focused.
+#s3://nisar-static-repo/LSAR_PARAMETER_SET/05020/RSLC/NISAR_ParameterSet_RSLC_20251017_default_v0.1.yaml was used to generate this runconfig.
+runconfig:
+    name: NISAR_L1-L-RSLC_RUNCONFIG
+    groups:
+        pge_name_group:
+            pge_name: RSLC_L_PGE
+        input_file_group:
+      # REQUIRED List of NISAR raw data products in L0B format.
+            input_file_path:
+            - /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_L0_PR_RRSD_032_128_D_161S_20261009T021028_20261009T021116_P05023_F_J_001.h5
+            qa_input_file: output/rslc.h5
+        dynamic_ancillary_file_group:
+            dem_file: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/dem.vrt
+            dem_file_description: Digital Elevation Model (DEM) for the 
+                NASA-ISRO NISAR mission, version 1.2, based on the Copernicus 
+                DEM 30-m (2023_1), referenced to the WGS84 ellipsoid. This 
+                digital elevation model (DEM) was prepared at the Jet Propulsion
+                Laboratory, California Institute of Technology, under contract 
+                with the National Aeronautics and Space Administration, using 
+                the Copernicus DEM 30-m COP-DEM_GLO-30-DGED/2023_1 model, 
+                provided by the European Space Agency (ESA). The Copernicus DEM 
+                30-m was produced using Copernicus WorldDEM-30  DLR e.V. 
+                2010-2014 and  Airbus Defence and Space GmbH 2014-2018 provided 
+                under COPERNICUS by the European Union and ESA; all rights 
+                reserved. The organizations in charge of the NISAR mission or 
+                the Copernicus programme by law or by delegation do not incur 
+                any liability for any use of the Copernicus WorldDEM-30. Users, 
+                including those who redistribute, adapt, modify, or combine the 
+                data contained in this DEM, must comply with the terms of the 
+                Copernicus DEM 30-m License Agreement. For additional 
+                information, please refer to https://doi.org/10.5067/NIDEM-1 and
+                https://doi.org/10.5270/ESA-c5d3d65.
+            orbit: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_ANC_J_PR_MOE_20261009T132236_20261007T205942_20261009T025942.xml
+            pointing: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_ANC_L_PR_NRP_20261009T140351_20261008T055942_20261009T115942.xml
+            external_calibration: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_LSAR_EXT_CAL_20250730T000000_04.yaml
+            internal_calibration: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_LSAR_INT_CAL_20250730T000000_02.h5
+            antenna_pattern: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_ANTPAT_20231129T093104_01.h5
+            corner_reflector_file: 
+                /data/work/jobs/2026/10/09/14/56/SCIFLO_RSLC__pcm_r05.02.2_pge_r05.02.3-track_frame_032_128_076_32_state-config-20261009T134801.835880Z/NISAR_ANC_CORNER_REFLECTORS_007.csv
+        product_path_group:
+            product_path: output
+            scratch_path: scratch
+            sas_output_file: output/rslc.h5
+            sas_config_file: output/rslc_config.yaml
+            product_counter: 1
+            qa_output_dir: output
+        primary_executable:
+            product_type: RSLC
+            product_version: 1.0.11
+            product_doi: 10.5067/NIL1RSLC-P1
+            composite_release_id: P05023
+            processing_type: PR
+            mission_id: NISAR
+            product_accuracy: N
+            urgent_request_id:
+            processing_center: J
+            data_source: A
+            partial_granule_id: 
+                NISAR_L1_PR_RSLC_032_128_D_076_{MODE}_{POLE}_A_{StartDateTime}_{EndDateTime}_P05023_N_{C}_J_001
+        geometry:
+            relative_orbit_number: 128
+            frame_number: 76
+            cycle_number: 32
+            orbit_direction: Descending
+            track_frame_polygon: '{"coordinates": [[[[-113.49576419142721, 26.098653475539056],
+                [-112.73410505846786, 25.91426202463371], [-112.2759227923751, 25.801126457433416],
+                [-111.09581373726384, 25.502067765746624], [-111.25958581316381, 24.9790224046816],
+                [-111.42168111009534, 24.455745341239293], [-111.58214012054678, 23.93224281231018],
+                [-111.74100215016115, 23.408520883941364], [-112.90313099825381, 23.700998220510662],
+                [-113.35416371354258, 23.811818898071397], [-114.10373497453104, 23.992659715940626],
+                [-113.95378652477112, 24.519418501625246], [-113.80249923575037, 25.04600688507286],
+                [-113.64983738752387, 25.572420156267068], [-113.49576419142721, 26.098653475539056]]]],
+                "type": "MultiPolygon"}'
+            full_coverage_threshold_percent: 75.0
+        debug_level_group:
+            debug_switch: false
+        worker:
+            gpu_enabled: true
+        processing:
+      #s3://nisar-static-repo/LSAR_PARAMETER_SET/05020/RSLC/NISAR_ParameterSet_RSLC_20251017_default_v0.1.yaml was used to generate this runconfig.
+      #s3://nisar-static-repo/PRODUCT_VERSION/NISAR_ProductVersion_20261009_v1.0.26.yaml is the location of the product version file.
+            output_grid:
+                start_time:
+                end_time:
+                output_prf: 1520
+            ephemeris_crop_pad:
+            range_window:
+                kind: Kaiser
+                shape: 1.6
+            range_common_band_filter: {}
+            rdr2geo: {}
+            geo2rdr: {}
+            doppler:
+                spacing: {}
+            rangecomp:
+                block_size: {}
+            azcomp:
+                block_size: {}
+                kernel: {}
+            dem: {}
+            nominal_antenna_size: {}
+            is_enabled:
+                eap: true
+            caltone:
+                frequency: 1214882813.0
+                algorithm: auto
+                wavelet_size: 64
+            radio_frequency_interference:
+                mitigation_enabled: true
+                mitigation_algorithm: tone-rank
+                tone_rank:
+                    fill_value: zero
+        qa:
+            qa_reports:
+                backscatter_img:
+                    output_individual_pngs: true
+                browse_latlon:
+                    output_browse_latlon: true
+            point_target_analyzer:
+                upsample_factor: 64
+            absolute_radiometric_calibration:
+                upsample_factor: 64
+

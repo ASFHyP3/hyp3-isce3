@@ -1,0 +1,50 @@
+FROM ghcr.io/prefix-dev/pixi:latest
+
+# For opencontainers label definitions, see:
+#    https://github.com/opencontainers/image-spec/blob/master/annotations.md
+LABEL org.opencontainers.image.title="HyP3 isce3 GPU"
+LABEL org.opencontainers.image.description="HyP3 plugin for isce3 processing, with CUDA isce3 for L0B focusing."
+LABEL org.opencontainers.image.vendor="Alaska Satellite Facility"
+LABEL org.opencontainers.image.authors="username_for_github_actions <email_for@github_actions.com>"
+LABEL org.opencontainers.image.licenses="BSD-3-Clause"
+LABEL org.opencontainers.image.url="https://github.com/ASFHyP3/hyp3-isce3"
+LABEL org.opencontainers.image.source="https://github.com/ASFHyP3/hyp3-isce3"
+LABEL org.opencontainers.image.documentation="https://hyp3-docs.asf.alaska.edu"
+
+# Dynamic lables to define at build time via `docker build --label`
+# LABEL org.opencontainers.image.created=""
+# LABEL org.opencontainers.image.version=""
+# LABEL org.opencontainers.image.revision=""
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=true
+
+# The NVIDIA container runtime mounts the host's GPU driver into the container when these are set.
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update && apt-get install -y --no-install-recommends git unzip vim wget ca-certificates && \
+  apt-get clean && rm -rf /var/lib/apt/lists/*
+
+
+USER 1000
+SHELL ["/bin/bash", "-l", "-c"]
+
+WORKDIR /hyp3-isce3/
+
+
+COPY --chown=1000:1000 pyproject.toml pixi.lock ./
+
+# No GPU exists at build time, so declare the CUDA version for pixi's cuda system requirement.
+RUN CONDA_OVERRIDE_CUDA=12.9 pixi install --locked -e gpu && \
+  pixi shell-hook -e gpu -s bash >> /home/ubuntu/.profile
+
+COPY --chown=1000:1000 . .
+
+RUN pixi run -e gpu install-editable-gpu
+
+
+WORKDIR /home/ubuntu/
+
+ENTRYPOINT ["/hyp3-isce3/src/hyp3_isce3/etc/entrypoint_gpu.sh"]
+CMD ["-h"]

@@ -37,6 +37,10 @@ develop = [
     "pytest-cov",
 ]
 
+[project.entry-points.hyp3]
+gunw = "hyp3_isce3.process:main"
+focus_l0b = "hyp3_isce3.focus.process:main"
+
 [project.urls]
 Homepage = "https://github.com/ASFHyP3/hyp3-isce3"
 Documentation = "https://hyp3-docs.asf.alaska.edu"
@@ -173,6 +177,38 @@ pyre = "*"
 whirlwind-insar = ">=0.10.0"
 raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3"}
 
+# GPU image (Dockerfile.gpu): conda-forge's CUDA build of isce3 replaces the CPU source build.
+[tool.pixi.feature.gpu]
+platforms = ["linux-64"]
+
+[tool.pixi.feature.gpu.system-requirements]
+cuda = "12"
+
+# Only what the focus path imports; the gpu environment skips the default feature (InSAR stack, git pypi deps).
+[tool.pixi.feature.gpu.dependencies]
+isce3 = { version = "0.25.21", build = "*cuda*" }
+python = "3.12.*"
+pip = "*"
+asf_search = "*"
+earthaccess = "*"
+gdal = ">=3"
+geopandas = "*"
+h5py = "*"
+hyp3lib = ">=4,<5"
+pyyaml = "*"
+shapely = "*"
+
+[tool.pixi.feature.gpu.tasks.install-editable-gpu]
+cmd = [
+    "python",
+    "-m",
+    "pip",
+    "install",
+    "--no-deps",
+    "-e",
+    ".",
+]
+
 [tool.pixi.feature.pycharm.dependencies]
 pixi-pycharm = "*"
 
@@ -190,6 +226,7 @@ default = { features = ["develop", "pycharm"], solve-group = "default" }
 py312 = { features = ["develop", "py312"]}
 py313 = { features = ["develop", "py313"]}
 py314 = { features = ["develop", "py314"], solve-group = "default"}
+gpu = { features = ["gpu"], no-default-feature = true }
 
 
 [tool.pixi.tasks.install-snaphu]
