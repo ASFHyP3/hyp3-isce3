@@ -1,7 +1,8 @@
 import contextlib
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -26,8 +27,8 @@ ANCILLARIES = {
 def test_decode_l0b_name():
     l0b = inputs.decode_l0b_name(f'/some/dir/{L0B}.h5')
     assert (l0b['cycle'], l0b['track'], l0b['direction'], l0b['crid']) == ('032', '128', 'D', 'P05023')
-    assert l0b['start_time'] == datetime(2026, 10, 9, 2, 10, 28)
-    assert l0b['end_time'] == datetime(2026, 10, 9, 2, 11, 16)
+    assert l0b['start_time'] == datetime(2026, 10, 9, 2, 10, 28, tzinfo=UTC)
+    assert l0b['end_time'] == datetime(2026, 10, 9, 2, 11, 16, tzinfo=UTC)
 
 
 def test_get_config_production_template(tmp_path):
@@ -86,7 +87,7 @@ def test_get_template_fallback(tmp_path, monkeypatch):
 class FakeRaw:
     """Stands in for an L0B reader: dual-pol HH/HV in both frequencies, as on the T120 L0Bs."""
 
-    polarizations = {'A': ['HH', 'HV'], 'B': ['HH', 'HV']}
+    polarizations: ClassVar[dict[str, list[str]]] = {'A': ['HH', 'HV'], 'B': ['HH', 'HV']}
 
     def getChirpParameters(self, freq_id, tx):
         # center frequency, sample rate, chirp slope, duration: 20 MHz on A, 5 MHz on B

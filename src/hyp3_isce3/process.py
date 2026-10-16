@@ -247,14 +247,17 @@ def download_yaml(reference_path: str) -> Path:
 
 
 def download_rslc(granule_name: str) -> str:
-    """Download RSLC product.
+    """Download RSLC product, or use it as is when it is already a local file.
 
     Args:
-        granule_name: Name of the scene.
+        granule_name: Name of the scene, or the path of a local RSLC h5 file.
 
     Returns:
         h5file_path: Path of the h5 file.
     """
+    # A local RSLC (e.g. one focused with ++process focus_l0b) is not in CMR.
+    if Path(granule_name).is_file():
+        return granule_name
     # Same lookup as the streaming path; keep only the .h5 in case the granule ships other files.
     files = earthaccess.download([find_rslc(granule_name)])
     h5_files = [f for f in files if str(f).endswith('.h5')]
@@ -569,7 +572,7 @@ def main() -> None:
         'granules',
         type=str.split,
         nargs='+',
-        help='NISAR RSLC granules',
+        help='NISAR RSLC granule names, or paths of local RSLC h5 files',
     )
     parser.add_argument(
         '--subset',
@@ -581,6 +584,8 @@ def main() -> None:
     args = parser.parse_args()
 
     args.granules = [item for sublist in args.granules for item in sublist]
+    # Make local RSLC paths absolute, as the run changes into its own working folder.
+    args.granules = [str(Path(g).resolve()) if Path(g).is_file() else g for g in args.granules]
     if len(args.granules) != 2:
         parser.error('Must provide exactly two granules')
 

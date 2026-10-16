@@ -2,7 +2,7 @@
 
 import logging
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import asf_search as asf
@@ -34,8 +34,8 @@ def decode_l0b_name(name: str) -> dict:
         'cycle': parts[4],
         'track': parts[5],
         'direction': parts[6],  # ascending/descending flag
-        'start_time': datetime.strptime(parts[8], '%Y%m%dT%H%M%S'),
-        'end_time': datetime.strptime(parts[9], '%Y%m%dT%H%M%S'),
+        'start_time': datetime.strptime(parts[8], '%Y%m%dT%H%M%S').replace(tzinfo=UTC),
+        'end_time': datetime.strptime(parts[9], '%Y%m%dT%H%M%S').replace(tzinfo=UTC),
         'crid': parts[10],  # composite release ID
     }
 
