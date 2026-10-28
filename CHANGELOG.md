@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [PEP 440](https://www.python.org/dev/peps/pep-0440/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0]
+
+### Added
+- `focus_l0b --subset LON_MIN LAT_MIN LON_MAX LAT_MAX` focuses only that bounding box, streaming just the pulses it needs instead of downloading the L0B (new `hyp3_isce3.focus.subset` module). The AOI is mapped onto the focus output grid with the GUNW crop's corner solve and snapped onto production's lattice; the pulse window comes from isce3's own block planning. A cropped L0B does not focus identically to the full one on its own, so the focus takes the raw grid, raw time span, and RX channel imbalance from a streamed skeleton of the full L0B, which makes the cropped focus match a full-frame focus to the run-to-run floor.
+
+### Changed
+- `--subset` parsing is shared by the GUNW and focus entry points (`hyp3_isce3.cli`).
+
 ## [0.4.0]
 
 ### Added

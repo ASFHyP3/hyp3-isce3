@@ -3,7 +3,8 @@ from pathlib import Path
 import yaml
 
 from hyp3_isce3 import process
-from hyp3_isce3.process import download_yaml, get_config, get_multilook_looks
+from hyp3_isce3.crop_rslc import get_multilook_looks
+from hyp3_isce3.process import download_yaml, get_config
 
 
 REFERENCE = 'NISAR_L1_PR_RSLC_005_019_A_011_4005_DHDH_A_20251111T120539_20251111T120614_P05023_N_F_J_001'
