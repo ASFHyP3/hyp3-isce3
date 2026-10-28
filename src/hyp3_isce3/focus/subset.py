@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 
 import earthaccess
 import h5py
@@ -41,6 +42,15 @@ BLOCK_PULSES = 2048
 MARGIN_SAMPLES = 512
 # The GUNW runconfig whose multilook looks set the lattice a subset grid must start on (see snap_to_full_frame).
 GUNW_FALLBACK = Path(hyp3_isce3.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
+
+
+class OutputGrid(TypedDict):
+    """The focus runconfig's output_grid fields a subset sets."""
+
+    start_time: datetime
+    end_time: datetime
+    start_range: float
+    end_range: float
 
 
 def to_datetime(epoch: isce3.core.DateTime) -> datetime:
@@ -122,7 +132,7 @@ class FocusGeometry:
     grid: isce3.product.RadarGridParameters  # the output grid of the reference band
 
 
-def focus_geometry(cfg: object) -> FocusGeometry:
+def focus_geometry(cfg: nisar_focus.Struct) -> FocusGeometry:
     """Mirror focus() up to its output grid, so planning and snapping use isce3's own grid.
 
     With the runconfig naming the skeleton (full pulse axis) and the template's frame times, the
@@ -166,7 +176,7 @@ def snap_to_full_frame(
     grid: isce3.product.RadarGridParameters,
     az_block: int,
     rg_block: int,
-) -> dict[str, datetime | float]:
+) -> OutputGrid:
     """Round a time/range span outward onto multiples of the multilook blocks from the full-frame corner.
 
     The GUNW workflow multilooks from its input RSLC's first line and sample, so a subset RSLC gives
@@ -211,7 +221,7 @@ def snap_to_full_frame(
     }
 
 
-def output_grid_for_aoi(cfg: object, subset: list[float], geometry: FocusGeometry) -> dict[str, datetime | float]:
+def output_grid_for_aoi(cfg: nisar_focus.Struct, subset: list[float], geometry: FocusGeometry) -> OutputGrid:
     """Map an AOI onto the focus output grid: its zero-Doppler time and slant-range spans.
 
     The four AOI corners are solved into radar coordinates with geo2rdr at their DEM heights (the
@@ -252,7 +262,7 @@ def output_grid_for_aoi(cfg: object, subset: list[float], geometry: FocusGeometr
     return out
 
 
-def needed_raw_span(cfg: object, geometry: FocusGeometry) -> tuple[isce3.core.DateTime, float, float]:
+def needed_raw_span(cfg: nisar_focus.Struct, geometry: FocusGeometry) -> tuple[isce3.core.DateTime, float, float]:
     """The raw time span the focus will read for cfg's output grid, from isce3's own block planning.
 
     Mirrors nisar.workflows.focus.focus() through plan_processing_blocks (zero-to-native Doppler
@@ -296,7 +306,7 @@ def pulse_windows(l0b_path: str, epoch: isce3.core.DateTime, begin: float, end: 
         {tx: (start, stop)} for every transmit polarization in the file.
     """
     raw = open_rrsd(l0b_path)
-    windows = {}
+    windows: dict[str, tuple[int, int]] = {}
     for frequency in raw.frequencies:
         for tx in {pol[0] for pol in raw.polarizations[frequency]}:
             times, _ = raw.getRadarGrid(frequency, tx=tx, epoch=epoch)
@@ -320,7 +330,7 @@ class RfiBlocks:
 
 
 def production_rfi_blocks(
-    cfg: object, geometry: FocusGeometry, skeleton_path: str, polarizations: list[str] | None
+    cfg: nisar_focus.Struct, geometry: FocusGeometry, skeleton_path: str, polarizations: list[str] | None
 ) -> RfiBlocks | None:
     """The tone-rank RFI blocks of a full-frame focus, or None when the runconfig does not mitigate with tone-rank.
 
@@ -381,7 +391,7 @@ def align_rfi_blocks(blocks: RfiBlocks, begin: float, end: float) -> tuple[float
     return begin, end
 
 
-def plan_pulses(cfg: object, skeleton_path: str, blocks: RfiBlocks | None) -> dict[str, tuple[int, int]]:
+def plan_pulses(cfg: nisar_focus.Struct, skeleton_path: str, blocks: RfiBlocks | None) -> dict[str, tuple[int, int]]:
     """The pulse windows the focus will read for the runconfig's output grid, RFI-aligned when blocks are given.
 
     Args:

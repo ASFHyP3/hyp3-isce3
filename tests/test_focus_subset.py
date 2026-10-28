@@ -1,6 +1,7 @@
 from bisect import bisect_left, bisect_right
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 
 import h5py
 import isce3
@@ -148,6 +149,10 @@ def test_aligned_window_tiles_into_production_blocks():
         assert ours <= production
 
 
+# These tests never reach the geometry: the RFI gate returns first, or needed_raw_span is stubbed.
+NO_GEOMETRY = cast(subset.FocusGeometry, None)
+
+
 def rfi_cfg(algorithm='tone-rank', mitigation=True):
     rfi = SimpleNamespace(
         detection_enabled=True,
@@ -169,17 +174,18 @@ class QuadPolRaw:
 
 
 def test_production_rfi_blocks_only_for_tone_rank_mitigation():
-    assert subset.production_rfi_blocks(rfi_cfg('ST-EVD'), None, 'skeleton.h5', None) is None
-    assert subset.production_rfi_blocks(rfi_cfg(mitigation=False), None, 'skeleton.h5', None) is None
+    assert subset.production_rfi_blocks(rfi_cfg('ST-EVD'), NO_GEOMETRY, 'skeleton.h5', None) is None
+    assert subset.production_rfi_blocks(rfi_cfg(mitigation=False), NO_GEOMETRY, 'skeleton.h5', None) is None
 
 
 def test_production_rfi_blocks_needs_one_transmit(monkeypatch):
     monkeypatch.setattr(subset, 'open_rrsd', lambda path: QuadPolRaw())
     monkeypatch.setattr(subset, 'needed_raw_span', lambda cfg, geometry: (None, 1.0, 2.0))
     with pytest.raises(NotImplementedError, match='one transmit'):
-        subset.production_rfi_blocks(rfi_cfg(), None, 'skeleton.h5', None)
+        subset.production_rfi_blocks(rfi_cfg(), NO_GEOMETRY, 'skeleton.h5', None)
     # Restricting the focus to one transmit is fine on a quad-pol file.
-    rfi_blocks = subset.production_rfi_blocks(rfi_cfg(), None, 'skeleton.h5', ['HH', 'HV'])
+    rfi_blocks = subset.production_rfi_blocks(rfi_cfg(), NO_GEOMETRY, 'skeleton.h5', ['HH', 'HV'])
+    assert rfi_blocks is not None
     assert (rfi_blocks.tx, rfi_blocks.start, rfi_blocks.stop, rfi_blocks.size) == ('H', 1000, 2001, 512)
 
 

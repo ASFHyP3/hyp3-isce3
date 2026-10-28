@@ -264,7 +264,7 @@ def _run_focus(
     yaml_path = get_config(template_yaml, l0b_paths, ancillaries, dem_path)
     template_yaml.unlink()  # consumed by the input lookups and the config build
 
-    reads = contextlib.nullcontext()
+    reads: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
     if subset:
         runconfig = yaml.safe_load(yaml_path.read_text())
         cfg = nisar_focus.load_config(str(yaml_path)).runconfig.groups
