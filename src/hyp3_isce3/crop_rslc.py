@@ -342,13 +342,11 @@ def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
 
     The wrapped interferogram is multilooked at the crossmul looks, and the unwrapped layers
     (and the ionosphere step, for both bands) at the phase_unwrap looks, all counted from the
-    first line/sample. The RSLC crop floors its window origin to a multiple of both so every
-    multilook grid coincides with a full-frame run. Sourcing them from the same runconfig the
-    workflow runs guarantees the two never drift. If looks are ever exposed as a
-    user/processing parameter, read that parameter here instead so the crop tracks it.
+    first line/sample. The RSLC crop and the subset focus floor their window origin to a multiple
+    of both so every multilook grid coincides with a full-frame run.
 
     Args:
-        template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`).
+        template_yaml: Path of a GUNW runconfig.
 
     Returns:
         az_step: Azimuth snap step, the lcm of the crossmul and phase_unwrap azimuth looks.

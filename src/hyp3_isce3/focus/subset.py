@@ -1,18 +1,16 @@
-"""Focus only an AOI of an L0B: stream the pulses it needs, and keep the full file's statistics.
+"""Focus only an AOI of an L0B: stream the pulses it needs into a skeleton of the L0B, and focus that.
 
-The AOI bounding box becomes the focus output grid (a zero-Doppler time span and a slant-range
-span). isce3 then only decodes the pulses that grid needs, so the saving is in download and disk,
-not compute: a skeleton of the L0B (everything but the signal arrays) is streamed, the pulse window
-is planned on it with isce3's own block planning, and only those pulses of the signal arrays are
-streamed into a cropped L0B.
+The AOI bounding box becomes the focus output grid, snapped onto the full-frame grid's multilook
+lattice. A skeleton of the L0B is streamed: every dataset whole, with the signal arrays allocated
+but empty. Only the pulses the output grid needs are then streamed into its signal arrays. isce3
+reads signal only inside that pulse window, and everything it derives from the whole file (raw grid,
+raw time span, RX channel imbalance) comes from the skeleton's full-length datasets, so the focus
+matches a full-L0B focus on the same grid.
 
-A cropped L0B does not focus identically to the full one on its own: isce3 derives three things
-from the whole file that change with the pulse set. The focus is therefore run with those taken
-from the skeleton, which holds every pulse-indexed dataset except the signal:
-- the raw grid (first pulse time and mean PRF), the lattice the dithered-PRF resample uses;
-- the raw time span, which sets the orbit/attitude crop and the Doppler LUT lattice;
-- the RX channel imbalance (caltone and LNA cal means over every pulse), used in beamforming.
-With these, the cropped focus matches the full focus to the run-to-run floor.
+To match the production RSLC, the pulse window is also widened so the tone-rank RFI blocks tile
+the same pulses as the production run's (see align_rfi_blocks). A residual remains: isce3's
+tone-rank step does not clear its block buffer between blocks, so the partial range windows carry
+tails from earlier blocks that a subset run does not have.
 """
 
 import contextlib
@@ -28,26 +26,26 @@ import earthaccess
 import h5py
 import isce3
 import numpy as np
-from nisar.antenna import pattern
 from nisar.products.readers.Raw import open_rrsd
-from nisar.products.readers.Raw.Raw import RawBase
 from nisar.workflows import focus as nisar_focus
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import get_multilook_looks, solve_aoi_corners
+from hyp3_isce3.crop_rslc import _snap_to_grid, get_multilook_looks, solve_aoi_corners
 
 
 log = logging.getLogger(__name__)
 
-# Pulses kept beyond the planned span, each side. The full file's raw grid can place its last lattice
-# time a few pulses past the crop's last pulse, and the beamformer requires it inside the file.
-PAD_SECONDS = 1.0
 # Pulses copied per read of the signal arrays (chunked 512 pulses, so this reads whole chunk rows).
 BLOCK_PULSES = 2048
 # Lines/samples added around the AOI, so the GUNW workflow's crop window (its own 512 margin) fits inside.
 MARGIN_SAMPLES = 512
 # The GUNW runconfig whose multilook looks set the lattice a subset grid must start on (see snap_to_full_frame).
 GUNW_FALLBACK = Path(hyp3_isce3.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
+
+
+def to_datetime(epoch: isce3.core.DateTime) -> datetime:
+    """An isce3 DateTime as a UTC datetime, to the microsecond."""
+    return datetime.fromisoformat(epoch.isoformat()[:26]).replace(tzinfo=UTC)
 
 
 def open_remote_l0b(granule: earthaccess.DataGranule) -> h5py.File:
@@ -73,7 +71,7 @@ def write_skeleton(src: h5py.File, skeleton_path: str | Path) -> Path:
     """Copy an L0B with the signal arrays left empty: full structure, every other dataset whole.
 
     The tree is walked by name (see open_remote_l0b). The signal arrays keep their shape and
-    chunking, so the path-based isce3 readers accept the skeleton as an L0B.
+    chunking, so isce3 reads the skeleton as the L0B once fill_pulses has written its pulse window.
 
     Args:
         src: Open source L0B (typically a remote handle).
@@ -115,7 +113,6 @@ def write_skeleton(src: h5py.File, skeleton_path: str | Path) -> Path:
 class FocusGeometry:
     """What nisar.workflows.focus.focus() sets up before it reads any pulses, for one runconfig."""
 
-    rawlist: list[RawBase]
     common_mode: object
     orbit: isce3.core.Orbit
     dem: isce3.geometry.DEMInterpolator
@@ -158,7 +155,7 @@ def focus_geometry(cfg: object) -> FocusGeometry:
     grid = nf.make_output_grid(
         cfg, grid_epoch, t0, t1, max_prf, r0, r1, dr, side, orbit, fc_ref, dop_ref, max_chirplen, dem
     )
-    return FocusGeometry(rawlist, common_mode, orbit, dem, fc_ref, dop_ref, range_spacings, grid)
+    return FocusGeometry(common_mode, orbit, dem, fc_ref, dop_ref, range_spacings, grid)
 
 
 def snap_to_full_frame(
@@ -193,20 +190,19 @@ def snap_to_full_frame(
         (r_lo - grid.starting_range) / grid.range_pixel_spacing,
         (r_hi - grid.starting_range) / grid.range_pixel_spacing,
     )
-    i_lo = max(0, math.floor(lines[0] / az_block) * az_block)
-    i_hi = min(grid.length, math.ceil(lines[1] / az_block) * az_block)
-    j_lo = max(0, math.floor(samples[0] / rg_block) * rg_block)
-    j_hi = min(grid.width, math.ceil(samples[1] / rg_block) * rg_block)
+    snapped = (
+        _snap_to_grid(lines[0], az_block),
+        _snap_to_grid(lines[1], az_block, expand_up=True),
+        _snap_to_grid(samples[0], rg_block),
+        _snap_to_grid(samples[1], rg_block, expand_up=True),
+    )
+    i_lo, i_hi = max(0, snapped[0]), min(grid.length, snapped[1])
+    j_lo, j_hi = max(0, snapped[2]), min(grid.width, snapped[3])
     if i_lo >= i_hi or j_lo >= j_hi:
         raise ValueError('The AOI does not overlap the frame')
-    if (i_lo, i_hi, j_lo, j_hi) != (
-        lines[0] // az_block * az_block,
-        -(-lines[1] // az_block) * az_block,
-        samples[0] // rg_block * rg_block,
-        -(-samples[1] // rg_block) * rg_block,
-    ):
+    if (i_lo, i_hi, j_lo, j_hi) != snapped:
         log.warning('The AOI extends past the frame; focusing the overlap.')
-    epoch = datetime.fromisoformat(grid.ref_epoch.isoformat()[:26]).replace(tzinfo=UTC)
+    epoch = to_datetime(grid.ref_epoch)
     return {
         'start_time': epoch + timedelta(seconds=grid.sensing_start + i_lo / grid.prf),
         'end_time': epoch + timedelta(seconds=grid.sensing_start + i_hi / grid.prf),
@@ -215,21 +211,7 @@ def snap_to_full_frame(
     }
 
 
-def microsecond_exact_lines(prf: float) -> int:
-    """The line count whose multiples are whole microseconds at this PRF (PRF / gcd(PRF, 1e6)).
-
-    Args:
-        prf: Output PRF in Hz; the lattice argument only holds for a whole number.
-
-    Returns:
-        The smallest k with k / prf a whole number of microseconds.
-    """
-    if prf != int(prf):
-        raise ValueError(f'output_prf {prf} is not a whole number of Hz')
-    return int(prf) // math.gcd(int(prf), 10**6)
-
-
-def output_grid_for_aoi(cfg: object, subset: list[float]) -> dict[str, datetime | float]:
+def output_grid_for_aoi(cfg: object, subset: list[float], geometry: FocusGeometry) -> dict[str, datetime | float]:
     """Map an AOI onto the focus output grid: its zero-Doppler time and slant-range spans.
 
     The four AOI corners are solved into radar coordinates with geo2rdr at their DEM heights (the
@@ -239,11 +221,11 @@ def output_grid_for_aoi(cfg: object, subset: list[float]) -> dict[str, datetime 
     Args:
         cfg: The loaded runconfig's groups, naming the skeleton and carrying the frame's output grid.
         subset: AOI bounding box [LON_MIN, LAT_MIN, LON_MAX, LAT_MAX] in WGS84 degrees.
+        geometry: focus_geometry(cfg).
 
     Returns:
         The output_grid fields to set: start_time, end_time, start_range, end_range.
     """
-    geometry = focus_geometry(cfg)
     grid = geometry.grid
     az_times, slant_ranges = solve_aoi_corners(geometry.orbit, grid, subset, cfg.dynamic_ancillary_file_group.dem_file)
 
@@ -256,7 +238,9 @@ def output_grid_for_aoi(cfg: object, subset: list[float]) -> dict[str, datetime 
     # The runconfig holds the start time to the microsecond, and k/PRF s is a whole number of
     # microseconds only when k is a multiple of PRF / gcd(PRF, 1e6) (19 lines at 1520 Hz). Folding
     # that into the block keeps every subset start exactly on the full-frame lattice.
-    az_block = math.lcm(az_step, microsecond_exact_lines(grid.prf))
+    if grid.prf != int(grid.prf):
+        raise ValueError(f'output_prf {grid.prf} is not a whole number of Hz')
+    az_block = math.lcm(az_step, int(grid.prf) // math.gcd(int(grid.prf), 10**6))
 
     t_lo, t_hi = min(az_times) - MARGIN_SAMPLES / grid.prf, max(az_times) + MARGIN_SAMPLES / grid.prf
     r_lo, r_hi = min(slant_ranges) - MARGIN_SAMPLES * dr, max(slant_ranges) + MARGIN_SAMPLES * dr
@@ -268,7 +252,7 @@ def output_grid_for_aoi(cfg: object, subset: list[float]) -> dict[str, datetime 
     return out
 
 
-def needed_raw_span(cfg: object) -> tuple[isce3.core.DateTime, float, float]:
+def needed_raw_span(cfg: object, geometry: FocusGeometry) -> tuple[isce3.core.DateTime, float, float]:
     """The raw time span the focus will read for cfg's output grid, from isce3's own block planning.
 
     Mirrors nisar.workflows.focus.focus() through plan_processing_blocks (zero-to-native Doppler
@@ -277,6 +261,7 @@ def needed_raw_span(cfg: object) -> tuple[isce3.core.DateTime, float, float]:
 
     Args:
         cfg: The loaded runconfig's groups (nisar_focus.load_config(...).runconfig.groups).
+        geometry: focus_geometry(cfg).
 
     Returns:
         epoch: Reference epoch of the span.
@@ -284,7 +269,6 @@ def needed_raw_span(cfg: object) -> tuple[isce3.core.DateTime, float, float]:
         end: End of the span (s since epoch).
     """
     nf = nisar_focus
-    geometry = focus_geometry(cfg)
     dr = min(geometry.range_spacings.values())
     # Per-frequency output grid and Doppler, then the raw bounds of every azcomp block.
     bounds = []
@@ -324,157 +308,154 @@ def pulse_windows(l0b_path: str, epoch: isce3.core.DateTime, begin: float, end: 
     return windows
 
 
-def crop_dataset(src: h5py.Dataset, dst: h5py.File, path: str, start: int, stop: int) -> None:
-    """Write src[start:stop] to dst at path with the same layout, in pulse blocks for the big arrays."""
-    shape = (stop - start, *src.shape[1:])
-    chunks = tuple(min(c, s) for c, s in zip(src.chunks, shape)) if src.chunks else None
-    out = dst.create_dataset(
-        path,
-        shape=shape,
-        dtype=src.dtype,
-        chunks=chunks,
-        compression=src.compression,
-        compression_opts=src.compression_opts,
-    )
-    out.attrs.update(src.attrs)
-    for i in range(start, stop, BLOCK_PULSES):
-        j = min(i + BLOCK_PULSES, stop)
-        out[i - start : j - start] = src[i:j]
+@dataclass
+class RfiBlocks:
+    """The tone-rank RFI blocks of the full-frame (production) focus, on one transmit polarization's pulses."""
+
+    tx: str
+    times: np.ndarray  # pulse times of the full file, s since the focus's grid epoch
+    start: int  # first pulse the full-frame focus reads
+    stop: int  # one past the last
+    size: int  # pulses per block
 
 
-def crop_l0b(
-    skeleton_path: str | Path, crop_path: str | Path, windows: dict[str, tuple[int, int]], signal_src: h5py.File
-) -> Path:
-    """Write a cropped L0B: the skeleton with every pulse-indexed dataset sliced, signal windows from signal_src.
+def production_rfi_blocks(
+    cfg: object, geometry: FocusGeometry, skeleton_path: str, polarizations: list[str] | None
+) -> RfiBlocks | None:
+    """The tone-rank RFI blocks of a full-frame focus, or None when the runconfig does not mitigate with tone-rank.
 
-    A dataset is pulse-indexed when its first axis has its transmit group's pulse count; these live
-    under swaths and highRateTelemetry. Everything else is copied unchanged. The identification
-    times follow the kept pulses; the bounding polygon is left as the full L0B's.
+    Args:
+        cfg: The loaded runconfig's groups, naming the skeleton and carrying the frame's output grid.
+        geometry: focus_geometry(cfg).
+        skeleton_path: Path of the skeleton.
+        polarizations: The polarizations to focus; None focuses every channel.
+    """
+    rfi = cfg.processing.radio_frequency_interference
+    # Only tone-rank mitigation changes the pulses block by block (detection alone leaves them as read).
+    if not (rfi.detection_enabled and rfi.mitigation_enabled and rfi.mitigation_algorithm.lower() == 'tone-rank'):
+        return None
+    raw = open_rrsd(skeleton_path)
+    txs = {
+        pol[0]
+        for frequency in raw.frequencies
+        for pol in raw.polarizations[frequency]
+        if not polarizations or pol in polarizations
+    }
+    # Each transmit has its own pulse axis and so its own blocks, but focus reads one span for all.
+    if len(txs) != 1:
+        raise NotImplementedError(f'RFI block alignment needs one transmit polarization; focusing tx {sorted(txs)}')
+    (tx,) = txs
+    epoch, begin, end = needed_raw_span(cfg, geometry)
+    times, _ = raw.getRadarGrid(raw.frequencies[0], tx=tx, epoch=epoch)
+    times = np.asarray(times)
+    blocks = RfiBlocks(tx, times, bisect_left(times, begin), bisect_right(times, end), rfi.tone_rank.block_dims[0])
+    log.info(f'Full-frame focus reads tx{tx} pulses [{blocks.start}, {blocks.stop}) in RFI blocks of {blocks.size}')
+    return blocks
+
+
+def align_rfi_blocks(blocks: RfiBlocks, begin: float, end: float) -> tuple[float, float]:
+    """Widen the raw span [begin, end] so the pulses read tile into the same RFI blocks as the production run.
+
+    The tone-rank step cuts the pulses read into blocks of blocks.size from the first pulse read, and
+    slides its last block back to end at the last pulse (isce3.noise.noise_power_est_func.cpi_slice_gen).
+    The window starts a whole number of blocks after the production run's first pulse and holds a
+    whole number of blocks; if it reaches into the production run's slid last block it ends where the
+    production run does, so its own last block slides back onto the same pulses.
+
+    Args:
+        blocks: The production run's RFI blocks.
+        begin: Start of the span the focus plans to read (s since the blocks' epoch).
+        end: End of that span (s).
+
+    Returns:
+        The widened span, between pulse times so a bisection picks exactly the aligned pulses.
+    """
+    t, size = blocks.times, blocks.size
+    start = max(blocks.start, blocks.start + (bisect_left(t, begin) - blocks.start) // size * size)
+    stop = start + math.ceil((bisect_right(t, end) - start) / size) * size
+    if stop > blocks.stop - size:
+        stop = blocks.stop
+    log.info(f'RFI block alignment: reading pulses [{start}, {stop}) of production [{blocks.start}, {blocks.stop})')
+    begin = (t[start - 1] + t[start]) / 2 if start > 0 else t[0] - 1
+    end = (t[stop - 1] + t[stop]) / 2 if stop < len(t) else t[-1] + 1
+    return begin, end
+
+
+def plan_pulses(cfg: object, skeleton_path: str, blocks: RfiBlocks | None) -> dict[str, tuple[int, int]]:
+    """The pulse windows the focus will read for the runconfig's output grid, RFI-aligned when blocks are given.
+
+    Args:
+        cfg: The loaded runconfig's groups, naming the skeleton and carrying the AOI output grid.
+        skeleton_path: Path of the skeleton.
+        blocks: The production run's RFI blocks, or None.
+
+    Returns:
+        {tx: (start, stop)} for every transmit polarization in the file.
+    """
+    epoch, begin, end = needed_raw_span(cfg, focus_geometry(cfg))
+    if blocks is not None:
+        begin, end = align_rfi_blocks(blocks, begin, end)
+    return pulse_windows(skeleton_path, epoch, begin, end)
+
+
+def fill_pulses(skeleton_path: str, windows: dict[str, tuple[int, int]], src: h5py.File) -> None:
+    """Write the pulse windows of every signal array from src into the skeleton.
+
+    Every polarization is filled, not only the focused ones: for quad-pol data the focus reads the
+    noise-only pulses of the other transmit's array.
 
     Args:
         skeleton_path: Path of the skeleton (signal arrays empty).
-        crop_path: Path of the cropped L0B to write.
-        windows: {tx: (start, stop)} pulse windows from pulse_windows.
-        signal_src: Handle the signal arrays are read from (typically the remote L0B).
-
-    Returns:
-        crop_path: Path of the written crop.
+        windows: {tx: (start, stop)} from plan_pulses.
+        src: Handle the signal arrays are read from (typically the remote L0B).
     """
-    crop_path = Path(crop_path)
-    with h5py.File(skeleton_path, 'r') as src, h5py.File(crop_path, 'w') as dst:
-        band = next(iter(src['science']))
-        swaths = src[f'science/{band}/RRSD/swaths']
-        first_freq = next(k for k in swaths if k.startswith('frequency'))
-        # Pulse count per transmit, from the UTCtime axis (shared by every frequency).
-        n_pulses = {tx: len(swaths[f'{first_freq}/tx{tx}/UTCtime']) for tx in windows}
-        dst.attrs.update(src.attrs)
-        sliced = 0
+    with h5py.File(skeleton_path, 'r+') as dst:
+        signals = []
 
-        def visit(path: str, obj: h5py.Group | h5py.Dataset) -> None:
-            nonlocal sliced
-            if isinstance(obj, h5py.Group):
-                dst.require_group(path).attrs.update(obj.attrs)
-                return
-            tx = next((tx for tx in windows if f'/tx{tx}/' in f'/{path}/'), None)
-            if tx is not None and obj.ndim >= 1 and obj.shape[0] == n_pulses[tx]:
-                crop_dataset(signal_src[path] if is_signal(obj) else obj, dst, path, *windows[tx])
-                sliced += 1
-            else:
-                dst.copy(obj, path)
+        def collect(path: str, obj: h5py.Group | h5py.Dataset) -> None:
+            if isinstance(obj, h5py.Dataset) and is_signal(obj):
+                signals.append(path)
 
-        src.visititems(visit)  # the skeleton is local and its signal arrays are empty, so a visit is cheap
-
-        # Identification times follow the kept pulses; the polygon is left as the full L0B's.
-        ident = dst[f'science/{band}/identification']
-        utc = dst[f'science/{band}/RRSD/swaths/{first_freq}/tx{next(iter(windows))}/UTCtime']
-        epoch = isce3.io.get_ref_epoch(utc.parent, 'UTCtime')
-        for name, seconds in (('zeroDopplerStartTime', utc[0]), ('zeroDopplerEndTime', utc[-1])):
-            old = ident[name][()].decode()
-            ident[name][()] = (epoch + isce3.core.TimeDelta(float(seconds))).isoformat()[: len(old)].encode()
-    log.info(f'Wrote cropped L0B: {crop_path} ({crop_path.stat().st_size / 1e6:.0f} MB, {sliced} datasets sliced)')
-    return crop_path
-
-
-def crop_streamed_l0b(granule: earthaccess.DataGranule, skeleton_path: str, runconfig_path: str | Path) -> str:
-    """Plan the pulse window the runconfig's output grid needs and stream it into <granule>_crop.h5.
-
-    Args:
-        granule: The L0B granule to stream the signal from.
-        skeleton_path: Path of its skeleton, which the runconfig's input_file_path must name.
-        runconfig_path: Path of the focus runconfig with the output grid set.
-
-    Returns:
-        crop_path: Path of the cropped L0B.
-    """
-    cfg = nisar_focus.load_config(str(runconfig_path)).runconfig.groups
-    epoch, begin, end = needed_raw_span(cfg)
-    windows = pulse_windows(skeleton_path, epoch, begin - PAD_SECONDS, end + PAD_SECONDS)
-    crop_path = f'{granule["umm"]["GranuleUR"]}_crop.h5'
-    with open_remote_l0b(granule) as remote:
-        crop_l0b(skeleton_path, crop_path, windows, remote)
-    return crop_path
+        dst.visititems(collect)  # local, and the visit only reads object headers
+        for path in signals:
+            start, stop = next(window for tx, window in windows.items() if f'/tx{tx}/' in f'/{path}/')
+            for i in range(start, stop, BLOCK_PULSES):
+                j = min(i + BLOCK_PULSES, stop)
+                dst[path][i:j] = src[path][i:j]
+    log.info(f'Streamed pulses {windows} of {len(signals)} signal arrays into {skeleton_path}')
 
 
 @contextlib.contextmanager
-def full_file_quantities(skeleton_path: str | None) -> Iterator[None]:
-    """Run the focus with the raw grid, raw span, and RX channel imbalance taken from the skeleton.
+def read_filled_pulses(
+    skeleton_path: str, windows: dict[str, tuple[int, int]], blocks: RfiBlocks | None
+) -> Iterator[None]:
+    """Run the focus on the filled skeleton: RFI-aligned span, and an error if it would read unfilled pulses.
 
-    These are the three things isce3 derives from the whole file (see the module docstring). The
-    reader and workflow functions that compute them are redirected to the skeleton for any other
-    file, and restored afterwards. The raw grid is the skeleton's grid sliced to the crop's pulses,
-    so the crop must be a contiguous slice of the skeleton's pulse axis.
+    The focus picks its pulses by bisecting each channel's pulse times against nisar_focus.total_bounds;
+    that is patched to widen the span (align_rfi_blocks) and to check it against the filled windows.
+    Unfilled pulses would otherwise read silently as zeros.
 
     Args:
-        skeleton_path: Path of the skeleton; None leaves the focus unchanged.
+        skeleton_path: Path of the filled skeleton, the focus input.
+        windows: {tx: (start, stop)} that fill_pulses wrote.
+        blocks: The production run's RFI blocks, or None.
     """
-    if skeleton_path is None:
-        yield
-        return
+    orig_total = nisar_focus.total_bounds
+    raw = open_rrsd(skeleton_path)
+    epoch = nisar_focus.get_total_grid_bounds([skeleton_path])[0]
 
-    skeleton = Path(skeleton_path).resolve()
-    full = None
+    def total_bounds(blocks_bounds: list) -> tuple[float, float]:
+        begin, end = orig_total(blocks_bounds)
+        if blocks is not None:
+            begin, end = align_rfi_blocks(blocks, begin, end)
+        for tx, (start, stop) in windows.items():
+            times, _ = raw.getRadarGrid(raw.frequencies[0], tx=tx, epoch=epoch)
+            if not (start <= bisect_left(times, begin) and bisect_right(times, end) <= stop):
+                raise ValueError(f'The focus would read tx{tx} pulses outside the streamed [{start}, {stop})')
+        return begin, end
 
-    def get_full() -> RawBase:
-        nonlocal full
-        if full is None:
-            full = open_rrsd(str(skeleton))
-        return full
-
-    orig_grid, orig_prf = RawBase.getRadarGrid, RawBase.getNominalPRF
-    orig_bounds = nisar_focus.get_total_grid_bounds
-    orig_imbalance = pattern.compute_all_rx_channel_imbalances_from_l0b
-
-    def getRadarGrid(
-        self: RawBase,
-        frequency: str = 'A',
-        tx: str = 'H',
-        prf: float | None = None,
-        epoch: isce3.core.DateTime | None = None,
-    ) -> tuple:  # noqa: N802
-        t, grid = orig_grid(self, frequency, tx, prf, epoch)
-        if prf or Path(self.filename).resolve() == skeleton:
-            return t, grid
-        full_t, full_grid = orig_grid(get_full(), frequency, tx, None, epoch)
-        i0 = int(np.searchsorted(full_t, t[0]))
-        if not np.allclose(full_t[i0 : i0 + len(t)], t, atol=1e-9):
-            raise ValueError(f'{self.filename} is not a contiguous pulse slice of {skeleton.name}')
-        return t, full_grid[i0 : i0 + len(t), :]
-
-    def getNominalPRF(self: RawBase, frequency: str = 'A', tx: str = 'H') -> float:  # noqa: N802
-        return orig_prf(get_full(), frequency, tx)
-
-    def get_total_grid_bounds(rawfiles: list[str]) -> tuple:
-        return orig_bounds([str(skeleton)])
-
-    def compute_all_rx_channel_imbalances_from_l0b(raw: RawBase, **kwargs: object) -> dict:
-        return orig_imbalance(get_full(), **kwargs)
-
-    RawBase.getRadarGrid, RawBase.getNominalPRF = getRadarGrid, getNominalPRF
-    nisar_focus.get_total_grid_bounds = get_total_grid_bounds
-    pattern.compute_all_rx_channel_imbalances_from_l0b = compute_all_rx_channel_imbalances_from_l0b
+    nisar_focus.total_bounds = total_bounds
     try:
         yield
     finally:
-        RawBase.getRadarGrid, RawBase.getNominalPRF = orig_grid, orig_prf
-        nisar_focus.get_total_grid_bounds = orig_bounds
-        pattern.compute_all_rx_channel_imbalances_from_l0b = orig_imbalance
+        nisar_focus.total_bounds = orig_total

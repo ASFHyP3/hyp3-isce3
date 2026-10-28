@@ -1,11 +1,12 @@
+from bisect import bisect_left, bisect_right
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import h5py
 import isce3
 import numpy as np
 import pytest
-from nisar.antenna import pattern
-from nisar.products.readers.Raw.Raw import RawBase
+from isce3.noise.noise_power_est_func import cpi_slice_gen
 from nisar.workflows import focus as nisar_focus
 
 from hyp3_isce3.focus import subset
@@ -41,54 +42,37 @@ def tiny_l0b(tmp_path):
     return path
 
 
-def test_write_skeleton_leaves_only_the_signal_empty(tiny_l0b, tmp_path):
+@pytest.fixture
+def skeleton(tiny_l0b, tmp_path):
     with h5py.File(tiny_l0b, 'r') as src:
-        skeleton = subset.write_skeleton(src, tmp_path / 'skeleton.h5')
+        return subset.write_skeleton(src, tmp_path / 'skeleton.h5')
+
+
+def test_write_skeleton_leaves_only_the_signal_empty(tiny_l0b, skeleton):
     with h5py.File(tiny_l0b, 'r') as src, h5py.File(skeleton, 'r') as dst:
-        signal = dst['science/LSAR/RRSD/swaths/frequencyA/txH/rxH/HH']
+        swaths = 'science/LSAR/RRSD/swaths/frequencyA/txH'
+        signal = dst[f'{swaths}/rxH/HH']
         assert (signal.shape, signal.chunks, signal.compression) == ((N_PULSES, 16), (8, 8), 'gzip')
         assert not signal[()]['r'].any()
         for path in (
-            'science/LSAR/RRSD/swaths/frequencyA/txH/UTCtime',
-            'science/LSAR/RRSD/swaths/frequencyA/txH/rxH/caltone',
+            f'{swaths}/UTCtime',
+            f'{swaths}/rxH/caltone',
             'science/LSAR/RRSD/highRateTelemetry/txH/rxH/QFSP0/X',
             'science/LSAR/RRSD/lowRateTelemetry/attitude/time',
         ):
             assert np.array_equal(src[path][()], dst[path][()])
-        assert (
-            dst['science/LSAR/RRSD/swaths/frequencyA/txH/UTCtime'].attrs['units']
-            == src['science/LSAR/RRSD/swaths/frequencyA/txH/UTCtime'].attrs['units']
-        )
-        assert dst['science/LSAR/RRSD/swaths/frequencyA/txH'].attrs['description'] == 'transmit H'
+        assert dst[f'{swaths}/UTCtime'].attrs['units'] == src[f'{swaths}/UTCtime'].attrs['units']
+        assert dst[swaths].attrs['description'] == 'transmit H'
         assert dst.attrs['Conventions'] == 'CF-1.7'
 
 
-def test_crop_l0b_slices_pulse_datasets_and_streams_the_signal(tiny_l0b, tmp_path):
-    with h5py.File(tiny_l0b, 'r') as src:
-        skeleton = subset.write_skeleton(src, tmp_path / 'skeleton.h5')
-    windows = {'H': (10, 40)}
+def test_fill_pulses_writes_only_the_window_of_the_signal(tiny_l0b, skeleton):
     with h5py.File(tiny_l0b, 'r') as remote:
-        crop = subset.crop_l0b(skeleton, tmp_path / 'crop.h5', windows, signal_src=remote)
-
-    with h5py.File(tiny_l0b, 'r') as src, h5py.File(crop, 'r') as dst:
-        swaths = 'science/LSAR/RRSD/swaths/frequencyA/txH'
-        # pulse-indexed datasets are sliced, the signal from the remote handle
-        assert np.array_equal(dst[f'{swaths}/UTCtime'][()], src[f'{swaths}/UTCtime'][10:40])
-        assert np.array_equal(dst[f'{swaths}/rxH/HH'][()], src[f'{swaths}/rxH/HH'][10:40])
-        assert np.array_equal(dst[f'{swaths}/rxH/caltone'][()], src[f'{swaths}/rxH/caltone'][10:40])
-        telemetry = 'science/LSAR/RRSD/highRateTelemetry/txH/rxH/QFSP0/X'
-        assert np.array_equal(dst[telemetry][()], src[telemetry][10:40])
-        # layout is kept, chunks clamped to the cropped size
-        assert dst[f'{swaths}/rxH/HH'].chunks == (8, 8)
-        assert dst[f'{swaths}/rxH/HH'].compression == 'gzip'
-        # everything without a pulse axis is untouched
-        assert np.array_equal(dst[f'{swaths}/rxH/BFPQLUT'][()], src[f'{swaths}/rxH/BFPQLUT'][()])
-        lowrate = 'science/LSAR/RRSD/lowRateTelemetry/attitude/time'
-        assert np.array_equal(dst[lowrate][()], src[lowrate][()])
-        # identification times follow the kept pulses (t = 1000 + i/1500 s after midnight, isce3 rounds to ns)
-        ident = dst['science/LSAR/identification']
-        assert ident['zeroDopplerStartTime'][()].decode() == '2025-11-04T00:16:40.006666667'
-        assert ident['zeroDopplerEndTime'][()].decode() == '2025-11-04T00:16:40.026000000'
+        subset.fill_pulses(str(skeleton), {'H': (10, 40)}, remote)
+    with h5py.File(tiny_l0b, 'r') as src, h5py.File(skeleton, 'r') as dst:
+        path = 'science/LSAR/RRSD/swaths/frequencyA/txH/rxH/HH'
+        assert np.array_equal(dst[path][10:40], src[path][10:40])
+        assert not dst[path][:10]['r'].any() and not dst[path][40:]['r'].any()
 
 
 def test_snap_to_full_frame_rounds_outward_onto_block_multiples():
@@ -103,14 +87,6 @@ def test_snap_to_full_frame_rounds_outward_onto_block_multiples():
     assert abs((out['end_time'] - start).total_seconds() - (100.0 + 2016 / 1520)) < 1e-6
     assert out['start_range'] == 900000.0 + 520 * 3.0
     assert out['end_range'] == 900000.0 + 1000 * 3.0
-
-
-def test_microsecond_exact_lines():
-    # 1520 = 16 * 5 * 19; a microsecond lattice absorbs the 16 and the 5
-    assert subset.microsecond_exact_lines(1520) == 19
-    assert subset.microsecond_exact_lines(1000) == 1
-    with pytest.raises(ValueError, match='whole number'):
-        subset.microsecond_exact_lines(1520.5)
 
 
 def test_snap_to_full_frame_with_exact_block_lands_on_whole_microseconds():
@@ -136,31 +112,84 @@ def test_snap_to_full_frame_outside_the_frame_raises():
         subset.snap_to_full_frame(200.0, 201.0, 900000.0, 900300.0, grid, 48, 520)
 
 
-def test_full_file_quantities_patches_and_restores(tmp_path):
-    originals = (
-        RawBase.getRadarGrid,
-        RawBase.getNominalPRF,
-        nisar_focus.get_total_grid_bounds,
-        pattern.compute_all_rx_channel_imbalances_from_l0b,
-    )
-    with subset.full_file_quantities(str(tmp_path / 'skeleton.h5')):
-        patched = (
-            RawBase.getRadarGrid,
-            RawBase.getNominalPRF,
-            nisar_focus.get_total_grid_bounds,
-            pattern.compute_all_rx_channel_imbalances_from_l0b,
-        )
-        assert all(p is not o for p, o in zip(patched, originals))
-    restored = (
-        RawBase.getRadarGrid,
-        RawBase.getNominalPRF,
-        nisar_focus.get_total_grid_bounds,
-        pattern.compute_all_rx_channel_imbalances_from_l0b,
-    )
-    assert all(r is o for r, o in zip(restored, originals))
+def blocks(start, stop, n=5000):
+    """Production RFI blocks of 512 pulses over [start, stop) of 1 kHz pulses."""
+    return subset.RfiBlocks('H', np.arange(n) / 1000.0, start, stop, 512)
 
 
-def test_full_file_quantities_none_is_a_no_op():
-    original = RawBase.getRadarGrid
-    with subset.full_file_quantities(None):
-        assert RawBase.getRadarGrid is original
+def aligned(rfi_blocks, first, last):
+    """The pulse window align_rfi_blocks gives for a plan needing pulses first..last."""
+    t = rfi_blocks.times
+    begin, end = subset.align_rfi_blocks(rfi_blocks, t[first], t[last])
+    return bisect_left(t, begin), bisect_right(t, end)
+
+
+def test_align_rfi_blocks_tiles_the_production_blocks():
+    # Start one block after production's first pulse, then three whole blocks.
+    assert aligned(blocks(100, 4700), 1000, 2000) == (612, 2148)
+
+
+def test_align_rfi_blocks_clips_to_the_production_window():
+    assert aligned(blocks(100, 4700), 50, 4800) == (100, 4700)
+
+
+def test_align_rfi_blocks_takes_the_production_end_inside_its_slid_last_block():
+    # Whole blocks would stop at 4196, inside production's slid last block [4188, 4700).
+    assert aligned(blocks(100, 4700), 3700, 4100) == (3684, 4700)
+
+
+def test_aligned_window_tiles_into_production_blocks():
+    # Every block isce3 cuts from the aligned window is one of the blocks it cuts from production's.
+    rfi_blocks = blocks(100, 4700)
+    production = {(s.start + 100, s.stop + 100) for s in cpi_slice_gen(4600, 512)}
+    for first, last in ((1000, 2000), (3700, 4100), (150, 600), (4000, 4650)):
+        start, stop = aligned(rfi_blocks, first, last)
+        ours = {(s.start + start, s.stop + start) for s in cpi_slice_gen(stop - start, 512)}
+        assert ours <= production
+
+
+def rfi_cfg(algorithm='tone-rank', mitigation=True):
+    rfi = SimpleNamespace(
+        detection_enabled=True,
+        mitigation_enabled=mitigation,
+        mitigation_algorithm=algorithm,
+        tone_rank=SimpleNamespace(block_dims=[512, 1024]),
+    )
+    return SimpleNamespace(processing=SimpleNamespace(radio_frequency_interference=rfi))
+
+
+class QuadPolRaw:
+    """Stand-in for an L0B reader with both transmit polarizations."""
+
+    frequencies = ['A']
+    polarizations = {'A': ['HH', 'HV', 'VH', 'VV']}
+
+    def getRadarGrid(self, frequency, tx, epoch):  # noqa: N802
+        return np.arange(5000) / 1000.0, None
+
+
+def test_production_rfi_blocks_only_for_tone_rank_mitigation():
+    assert subset.production_rfi_blocks(rfi_cfg('ST-EVD'), None, 'skeleton.h5', None) is None
+    assert subset.production_rfi_blocks(rfi_cfg(mitigation=False), None, 'skeleton.h5', None) is None
+
+
+def test_production_rfi_blocks_needs_one_transmit(monkeypatch):
+    monkeypatch.setattr(subset, 'open_rrsd', lambda path: QuadPolRaw())
+    monkeypatch.setattr(subset, 'needed_raw_span', lambda cfg, geometry: (None, 1.0, 2.0))
+    with pytest.raises(NotImplementedError, match='one transmit'):
+        subset.production_rfi_blocks(rfi_cfg(), None, 'skeleton.h5', None)
+    # Restricting the focus to one transmit is fine on a quad-pol file.
+    rfi_blocks = subset.production_rfi_blocks(rfi_cfg(), None, 'skeleton.h5', ['HH', 'HV'])
+    assert (rfi_blocks.tx, rfi_blocks.start, rfi_blocks.stop, rfi_blocks.size) == ('H', 1000, 2001, 512)
+
+
+def test_read_filled_pulses_refuses_unfilled_pulses_and_restores(monkeypatch):
+    monkeypatch.setattr(subset, 'open_rrsd', lambda path: QuadPolRaw())
+    monkeypatch.setattr(nisar_focus, 'get_total_grid_bounds', lambda paths: (None,))
+    original = nisar_focus.total_bounds
+    t = np.arange(5000) / 1000.0
+    with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
+        assert nisar_focus.total_bounds([(None, (t[1500], t[2000]))]) == (t[1500], t[2000])
+        with pytest.raises(ValueError, match='outside the streamed'):
+            nisar_focus.total_bounds([(None, (t[900], t[2000]))])
+    assert nisar_focus.total_bounds is original

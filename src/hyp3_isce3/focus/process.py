@@ -5,7 +5,7 @@ import contextlib
 import logging
 import zipfile
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import earthaccess
@@ -26,10 +26,14 @@ from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.focus.ancillary import download_latest_ancillaries, download_named_ancillaries
 from hyp3_isce3.focus.inputs import decode_l0b_name, download_l0b, find_l0b, get_template, l0b_footprint
 from hyp3_isce3.focus.subset import (
-    crop_streamed_l0b,
-    full_file_quantities,
+    fill_pulses,
+    focus_geometry,
     open_remote_l0b,
     output_grid_for_aoi,
+    plan_pulses,
+    production_rfi_blocks,
+    read_filled_pulses,
+    to_datetime,
     write_skeleton,
 )
 
@@ -136,7 +140,7 @@ def get_frame_times(l0b_path: str, orbit_path: str, track_frame_polygon: str) ->
         start, end = max(start, pulse_times[0]), min(end, pulse_times[-1])
 
     # Orbit times are seconds since its reference epoch; isce3 prints nanoseconds, Python keeps microseconds.
-    epoch = datetime.fromisoformat(orbit.reference_epoch.isoformat()[:26]).replace(tzinfo=UTC)
+    epoch = to_datetime(orbit.reference_epoch)
     start_time, end_time = epoch + timedelta(seconds=start), epoch + timedelta(seconds=end)
     # Round inward to whole seconds: an explicit start_time skips isce3's azimuth-grid snap, and whole
     # seconds sit on that grid (1/PRF from midnight), so the lines line up with the production RSLC's.
@@ -227,14 +231,12 @@ def _run_focus(
     if subset:
         if len(l0b_granules) > 1:
             raise NotImplementedError('--subset is not supported on a frame focused from two L0Bs')
-        # Stream a skeleton (everything but the signal arrays) instead of the full L0B. It stands in
-        # for the L0B in every step up to the focus, and the AOI's pulses are streamed once the
-        # output grid is known.
+        # Stream a skeleton (everything but the signal arrays) instead of the full L0B. It is the L0B
+        # for every step, and the AOI's pulses are streamed into it once the output grid is known.
         with open_remote_l0b(l0b_granules[0]) as remote:
             skeleton = str(write_skeleton(remote, f'{l0b_name}_skeleton.h5'))
         l0b_paths = [skeleton]
     else:
-        skeleton = None
         l0b_paths = [download_l0b(granule) for granule in l0b_granules]
         log.info(f'Downloaded L0B: {[Path(p).name for p in l0b_paths]}')
 
@@ -262,27 +264,29 @@ def _run_focus(
     yaml_path = get_config(template_yaml, l0b_paths, ancillaries, dem_path)
     template_yaml.unlink()  # consumed by the input lookups and the config build
 
-    if skeleton:
+    reads = contextlib.nullcontext()
+    if subset:
         runconfig = yaml.safe_load(yaml_path.read_text())
-        groups = runconfig['runconfig']['groups']
-
-        # 1. Cut the output grid to the AOI: its zero-Doppler time span and slant-range span, snapped onto
-        #    the full-frame grid's multilook lattice so a subset GUNW matches a full-frame one.
         cfg = nisar_focus.load_config(str(yaml_path)).runconfig.groups
-        groups['processing']['output_grid'].update(output_grid_for_aoi(cfg, subset))
+        geometry = focus_geometry(cfg)
 
-        # 2. Stream the pulses that grid needs into a cropped L0B. The planning reads the runconfig, which
-        #    still names the skeleton: it carries the full pulse axis, so the window is the full file's.
-        yaml_path.write_text(yaml.safe_dump(runconfig, sort_keys=False))
-        crop_path = crop_streamed_l0b(l0b_granules[0], skeleton, yaml_path)
+        # 1. The tone-rank RFI blocks of the full-frame focus; the subset focus must tile the same pulses.
+        rfi_blocks = production_rfi_blocks(cfg, geometry, skeleton, polarizations)
 
-        # 3. Focus the crop in place of the L0B. The skeleton is not an input any more, but it stays the
-        #    source of the whole-file quantities the focus needs (see full_file_quantities below).
-        groups['input_file_group']['input_file_path'] = [crop_path]
+        # 2. Cut the output grid to the AOI: its zero-Doppler time span and slant-range span, snapped onto
+        #    the full-frame grid's multilook lattice so a subset GUNW matches a full-frame one.
+        runconfig['runconfig']['groups']['processing']['output_grid'].update(output_grid_for_aoi(cfg, subset, geometry))
         yaml_path.write_text(yaml.safe_dump(runconfig, sort_keys=False))
+        del geometry  # holds the frame DEM, not needed during the focus
+
+        # 3. Stream the pulses that grid needs into the skeleton, which the focus then reads as the L0B.
+        windows = plan_pulses(nisar_focus.load_config(str(yaml_path)).runconfig.groups, skeleton, rfi_blocks)
+        with open_remote_l0b(l0b_granules[0]) as remote:
+            fill_pulses(skeleton, windows, remote)
+        reads = read_filled_pulses(skeleton, windows, rfi_blocks)
 
     log.info(f'Running the isce3 focus workflow on the GPU, polarizations: {polarizations or "all"}')
-    with only_polarizations(polarizations), full_file_quantities(skeleton):
+    with only_polarizations(polarizations), reads:
         nisar_focus.focus(nisar_focus.load_config(str(yaml_path)), str(yaml_path))
 
     output = Path('output/rslc.h5')
