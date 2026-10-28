@@ -35,8 +35,10 @@ WORKDIR /hyp3-isce3/
 
 COPY --chown=1000:1000 pyproject.toml pixi.lock ./
 
-# No GPU exists at build time, so declare the CUDA version for pixi's cuda system requirement.
-RUN CONDA_OVERRIDE_CUDA=12.9 pixi install --locked -e gpu && \
+# No GPU exists at build time, so declare the CUDA version for pixi's cuda system requirement. As a build
+# argument it reaches every pixi call below (each checks it) but not the runtime image, which has the real driver.
+ARG CONDA_OVERRIDE_CUDA=12.9
+RUN pixi install --locked -e gpu && \
   pixi shell-hook -e gpu -s bash >> /home/ubuntu/.profile
 
 COPY --chown=1000:1000 . .
