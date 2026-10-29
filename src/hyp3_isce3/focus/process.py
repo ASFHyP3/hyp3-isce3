@@ -280,7 +280,9 @@ def _run_focus(
         del geometry  # holds the frame DEM, not needed during the focus
 
         # 3. Stream the pulses that grid needs into the skeleton, which the focus then reads as the L0B.
-        windows = plan_pulses(nisar_focus.load_config(str(yaml_path)).runconfig.groups, skeleton, rfi_blocks)
+        #    Planned on the focused channels only, as the focus plans; steps 1-2 keep production's channels.
+        with only_polarizations(polarizations):
+            windows = plan_pulses(nisar_focus.load_config(str(yaml_path)).runconfig.groups, skeleton, rfi_blocks)
         with open_remote_l0b(l0b_granules[0]) as remote:
             fill_pulses(skeleton, windows, remote)
         reads = read_filled_pulses(skeleton, windows, rfi_blocks)
@@ -321,7 +323,8 @@ def main() -> None:
         '--subset',
         type=nullable_subset_list,
         nargs='*',
-        help='Optional WGS84 bounding box to focus only (LON_MIN LAT_MIN LON_MAX LAT_MAX); streams just its pulses',
+        help='Optional WGS84 bounding box to focus only (LON_MIN LAT_MIN LON_MAX LAT_MAX); streams just its pulses. '
+        'On quad-pol L0Bs, also pass --polarizations with a single transmit (e.g. HH HV)',
     )
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)

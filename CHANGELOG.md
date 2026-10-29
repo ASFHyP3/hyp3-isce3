@@ -9,7 +9,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.5.0]
 
 ### Added
-- `focus_l0b --subset LON_MIN LAT_MIN LON_MAX LAT_MAX` focuses only that bounding box, streaming just the pulses it needs instead of downloading the L0B (new `hyp3_isce3.focus.subset` module). The AOI is mapped onto the focus output grid with the GUNW crop's corner solve and snapped onto production's multilook lattice; the pulse window comes from isce3's own block planning, widened so the tone-rank RFI blocks tile the same pulses as the production run. The pulses are streamed into a skeleton of the full L0B (every other dataset whole), which is focused as the L0B, so whole-file quantities such as the raw grid and RX channel imbalance are the full file's.
+- `focus_l0b --subset LON_MIN LAT_MIN LON_MAX LAT_MAX` focuses only that bounding box, streaming just the pulses it needs instead of downloading the L0B (new `hyp3_isce3.focus.subset` module). The AOI is mapped onto the focus output grid with the GUNW crop's corner solve and snapped onto production's multilook lattice; the pulse window comes from isce3's own block planning, widened so the tone-rank RFI blocks tile the same pulses as the production run. The pulses are streamed into a skeleton of the full L0B (every other dataset whole), which is focused as the L0B, so whole-file quantities such as the raw grid and RX channel imbalance are the full file's. With tone-rank RFI mitigation, a quad-pol L0B needs `--polarizations` with a single transmit (e.g. `HH HV`), since each transmit has its own RFI blocks.
 
 ### Changed
 - `--subset` parsing is shared by the GUNW and focus entry points (`hyp3_isce3.cli`).

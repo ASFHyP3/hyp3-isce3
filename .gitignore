@@ -242,5 +242,4 @@ tags
 [._]*.un~
 
 figures/
-*.png
 *.DS_Store

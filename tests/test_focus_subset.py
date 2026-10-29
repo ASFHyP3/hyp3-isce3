@@ -1,7 +1,7 @@
 from bisect import bisect_left, bisect_right
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import cast
+from typing import ClassVar, cast
 
 import h5py
 import isce3
@@ -67,6 +67,48 @@ def test_write_skeleton_leaves_only_the_signal_empty(tiny_l0b, skeleton):
         assert dst.attrs['Conventions'] == 'CF-1.7'
 
 
+class FakeRemoteFile:
+    """Stand-in for an earthaccess remote file: opens a local path and records closing."""
+
+    def __init__(self, path):
+        self.path = path
+        self.handle = path.open('rb')  # noqa: SIM115
+        self.closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def close(self):
+        self.handle.close()
+        self.closed = True
+
+
+# The fields of a CMR granule that open_remote_l0b reads.
+GRANULE = cast(subset.earthaccess.DataGranule, {'umm': {'GranuleUR': 'l0b'}})
+
+
+def test_open_remote_l0b_closes_every_granule_file(tiny_l0b, tmp_path, monkeypatch):
+    qa = tmp_path / 'l0b_QA_STATS.h5'
+    qa.write_bytes(b'')
+    files = [FakeRemoteFile(tiny_l0b), FakeRemoteFile(qa)]
+    monkeypatch.setattr(subset.earthaccess, 'open', lambda granules: files)
+    with subset.open_remote_l0b(GRANULE) as remote:
+        assert 'science/LSAR/identification' in remote
+        assert not any(f.closed for f in files)
+    assert all(f.closed for f in files)
+
+
+def test_open_remote_l0b_without_the_h5_closes_and_raises(tmp_path, monkeypatch):
+    qa = tmp_path / 'l0b_QA_STATS.h5'
+    qa.write_bytes(b'')
+    files = [FakeRemoteFile(qa)]
+    monkeypatch.setattr(subset.earthaccess, 'open', lambda granules: files)
+    with pytest.raises(RuntimeError, match='No l0b.h5'):
+        with subset.open_remote_l0b(GRANULE):
+            pass
+    assert files[0].closed
+
+
 def test_fill_pulses_writes_only_the_window_of_the_signal(tiny_l0b, skeleton):
     with h5py.File(tiny_l0b, 'r') as remote:
         subset.fill_pulses(str(skeleton), {'H': (10, 40)}, remote)
@@ -74,6 +116,11 @@ def test_fill_pulses_writes_only_the_window_of_the_signal(tiny_l0b, skeleton):
         path = 'science/LSAR/RRSD/swaths/frequencyA/txH/rxH/HH'
         assert np.array_equal(dst[path][10:40], src[path][10:40])
         assert not dst[path][:10]['r'].any() and not dst[path][40:]['r'].any()
+
+
+def test_fill_pulses_without_a_window_for_the_transmit_raises(tiny_l0b, skeleton):
+    with h5py.File(tiny_l0b, 'r') as remote, pytest.raises(ValueError, match='No pulse window'):
+        subset.fill_pulses(str(skeleton), {'V': (10, 40)}, remote)
 
 
 def test_snap_to_full_frame_rounds_outward_onto_block_multiples():
@@ -130,8 +177,14 @@ def test_align_rfi_blocks_tiles_the_production_blocks():
     assert aligned(blocks(100, 4700), 1000, 2000) == (612, 2148)
 
 
-def test_align_rfi_blocks_clips_to_the_production_window():
+def test_align_rfi_blocks_clips_to_the_production_window(caplog):
     assert aligned(blocks(100, 4700), 50, 4800) == (100, 4700)
+    assert 'past production' in caplog.text
+
+
+def test_align_rfi_blocks_inside_production_does_not_warn(caplog):
+    aligned(blocks(100, 4700), 1000, 2000)
+    assert 'past production' not in caplog.text
 
 
 def test_align_rfi_blocks_takes_the_production_end_inside_its_slid_last_block():
@@ -166,10 +219,10 @@ def rfi_cfg(algorithm='tone-rank', mitigation=True):
 class QuadPolRaw:
     """Stand-in for an L0B reader with both transmit polarizations."""
 
-    frequencies = ['A']
-    polarizations = {'A': ['HH', 'HV', 'VH', 'VV']}
+    frequencies: ClassVar[list[str]] = ['A']
+    polarizations: ClassVar[dict[str, list[str]]] = {'A': ['HH', 'HV', 'VH', 'VV']}
 
-    def getRadarGrid(self, frequency, tx, epoch):  # noqa: N802
+    def getRadarGrid(self, frequency, tx, epoch):
         return np.arange(5000) / 1000.0, None
 
 
@@ -196,6 +249,21 @@ def test_read_filled_pulses_refuses_unfilled_pulses_and_restores(monkeypatch):
     t = np.arange(5000) / 1000.0
     with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
         assert nisar_focus.total_bounds([(None, (t[1500], t[2000]))]) == (t[1500], t[2000])
-        with pytest.raises(ValueError, match='outside the streamed'):
+    assert nisar_focus.total_bounds is original
+    with pytest.raises(ValueError, match='outside the streamed'):
+        with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
             nisar_focus.total_bounds([(None, (t[900], t[2000]))])
     assert nisar_focus.total_bounds is original
+
+
+def test_read_filled_pulses_needs_exactly_one_total_bounds_call(monkeypatch):
+    monkeypatch.setattr(subset, 'open_rrsd', lambda path: QuadPolRaw())
+    monkeypatch.setattr(nisar_focus, 'get_total_grid_bounds', lambda paths: (None,))
+    t = np.arange(5000) / 1000.0
+    with pytest.raises(RuntimeError, match='0 times'):
+        with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
+            pass
+    with pytest.raises(RuntimeError, match='2 times'):
+        with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
+            nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
+            nisar_focus.total_bounds([(None, (t[1500], t[2000]))])

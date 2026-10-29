@@ -58,18 +58,26 @@ def to_datetime(epoch: isce3.core.DateTime) -> datetime:
     return datetime.fromisoformat(epoch.isoformat()[:26]).replace(tzinfo=UTC)
 
 
-def open_remote_l0b(granule: earthaccess.DataGranule) -> h5py.File:
-    """Open an L0B granule's raw .h5 over HTTPS as an h5py handle (no download).
+@contextlib.contextmanager
+def open_remote_l0b(granule: earthaccess.DataGranule) -> Iterator[h5py.File]:
+    """Open an L0B granule's raw .h5 over HTTPS as an h5py handle (no download), closing every granule file after.
 
     Never walk this handle with visititems: an object visit makes HDF5 walk the signal arrays'
     chunk indexes, whose nodes are spread through the file, which streams the whole file.
     """
     name = granule['umm']['GranuleUR']
     # earthaccess.open handles auth and block-caches reads; the granule also carries a QA stats file.
-    files = [f for f in earthaccess.open([granule]) if str(f.path).endswith(f'{name}.h5')]
-    if not files:
-        raise RuntimeError(f'No {name}.h5 among the granule files')
-    return h5py.File(files[0], 'r', driver='fileobj')
+    files = earthaccess.open([granule])
+    try:
+        h5_files = [f for f in files if str(f.path).endswith(f'{name}.h5')]
+        if not h5_files:
+            raise RuntimeError(f'No {name}.h5 among the granule files')
+        # Closing the h5py handle does not close the remote file under it, so close each one here.
+        with h5py.File(h5_files[0], 'r', driver='fileobj') as h5:
+            yield h5
+    finally:
+        for f in files:
+            f.close()
 
 
 def is_signal(dataset: h5py.Dataset) -> bool:
@@ -353,7 +361,10 @@ def production_rfi_blocks(
     }
     # Each transmit has its own pulse axis and so its own blocks, but focus reads one span for all.
     if len(txs) != 1:
-        raise NotImplementedError(f'RFI block alignment needs one transmit polarization; focusing tx {sorted(txs)}')
+        raise NotImplementedError(
+            f'RFI block alignment needs one transmit polarization; focusing tx {sorted(txs)}. '
+            'Pass --polarizations with a single transmit (e.g. HH HV) to subset this L0B.'
+        )
     (tx,) = txs
     epoch, begin, end = needed_raw_span(cfg, geometry)
     times, _ = raw.getRadarGrid(raw.frequencies[0], tx=tx, epoch=epoch)
@@ -370,7 +381,8 @@ def align_rfi_blocks(blocks: RfiBlocks, begin: float, end: float) -> tuple[float
     slides its last block back to end at the last pulse (isce3.noise.noise_power_est_func.cpi_slice_gen).
     The window starts a whole number of blocks after the production run's first pulse and holds a
     whole number of blocks; if it reaches into the production run's slid last block it ends where the
-    production run does, so its own last block slides back onto the same pulses.
+    production run does, so its own last block slides back onto the same pulses. A span reaching past
+    the production run's pulses is cut to them: production focused without those pulses too.
 
     Args:
         blocks: The production run's RFI blocks.
@@ -381,8 +393,14 @@ def align_rfi_blocks(blocks: RfiBlocks, begin: float, end: float) -> tuple[float
         The widened span, between pulse times so a bisection picks exactly the aligned pulses.
     """
     t, size = blocks.times, blocks.size
-    start = max(blocks.start, blocks.start + (bisect_left(t, begin) - blocks.start) // size * size)
-    stop = start + math.ceil((bisect_right(t, end) - start) / size) * size
+    first, last = bisect_left(t, begin), bisect_right(t, end)
+    if first < blocks.start or last > blocks.stop:
+        log.warning(
+            f'The focus plans pulses [{first}, {last}) past production [{blocks.start}, {blocks.stop}); '
+            "reading only production's, so the edge lines' aperture is cut as in production"
+        )
+    start = max(blocks.start, blocks.start + (first - blocks.start) // size * size)
+    stop = start + math.ceil((last - start) / size) * size
     if stop > blocks.stop - size:
         stop = blocks.stop
     log.info(f'RFI block alignment: reading pulses [{start}, {stop}) of production [{blocks.start}, {blocks.stop})')
@@ -428,7 +446,10 @@ def fill_pulses(skeleton_path: str, windows: dict[str, tuple[int, int]], src: h5
 
         dst.visititems(collect)  # local, and the visit only reads object headers
         for path in signals:
-            start, stop = next(window for tx, window in windows.items() if f'/tx{tx}/' in f'/{path}/')
+            txs = [tx for tx in windows if f'/tx{tx}/' in f'/{path}/']
+            if not txs:
+                raise ValueError(f'No pulse window for signal array {path}; windows are for tx {sorted(windows)}')
+            start, stop = windows[txs[0]]
             for i in range(start, stop, BLOCK_PULSES):
                 j = min(i + BLOCK_PULSES, stop)
                 dst[path][i:j] = src[path][i:j]
@@ -443,7 +464,8 @@ def read_filled_pulses(
 
     The focus picks its pulses by bisecting each channel's pulse times against nisar_focus.total_bounds;
     that is patched to widen the span (align_rfi_blocks) and to check it against the filled windows.
-    Unfilled pulses would otherwise read silently as zeros.
+    Unfilled pulses would otherwise read silently as zeros. The focus must call it exactly once (as
+    isce3 0.25 does); any other count means the patch did not govern the read, which is an error.
 
     Args:
         skeleton_path: Path of the filled skeleton, the focus input.
@@ -453,8 +475,11 @@ def read_filled_pulses(
     orig_total = nisar_focus.total_bounds
     raw = open_rrsd(skeleton_path)
     epoch = nisar_focus.get_total_grid_bounds([skeleton_path])[0]
+    calls = 0
 
     def total_bounds(blocks_bounds: list) -> tuple[float, float]:
+        nonlocal calls
+        calls += 1
         begin, end = orig_total(blocks_bounds)
         if blocks is not None:
             begin, end = align_rfi_blocks(blocks, begin, end)
@@ -469,3 +494,5 @@ def read_filled_pulses(
         yield
     finally:
         nisar_focus.total_bounds = orig_total
+    if calls != 1:
+        raise RuntimeError(f'The focus called total_bounds {calls} times, not once; the pulse span went unchecked')
