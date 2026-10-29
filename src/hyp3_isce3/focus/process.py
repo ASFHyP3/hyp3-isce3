@@ -36,6 +36,7 @@ from hyp3_isce3.focus.subset import (
     to_datetime,
     write_skeleton,
 )
+from hyp3_isce3.process import download_yaml
 
 
 log = logging.getLogger(__name__)
@@ -274,8 +275,13 @@ def _run_focus(
         rfi_blocks = production_rfi_blocks(cfg, geometry, skeleton, polarizations)
 
         # 2. Cut the output grid to the AOI: its zero-Doppler time span and slant-range span, snapped onto
-        #    the full-frame grid's multilook lattice so a subset GUNW matches a full-frame one.
-        runconfig['runconfig']['groups']['processing']['output_grid'].update(output_grid_for_aoi(cfg, subset, geometry))
+        #    the full-frame grid's multilook lattice so a subset GUNW matches a full-frame one. The lattice
+        #    uses the looks of the GUNW runconfig the GUNW workflow will pick for this frame.
+        l0b = decode_l0b_name(l0b_name)
+        gunw_yaml = download_yaml(f'{l0b["track"]}_{l0b["direction"]}_{frame:03d}')
+        output_grid = output_grid_for_aoi(cfg, subset, geometry, gunw_yaml)
+        gunw_yaml.unlink()
+        runconfig['runconfig']['groups']['processing']['output_grid'].update(output_grid)
         yaml_path.write_text(yaml.safe_dump(runconfig, sort_keys=False))
         del geometry  # holds the frame DEM, not needed during the focus
 

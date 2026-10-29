@@ -30,7 +30,6 @@ import numpy as np
 from nisar.products.readers.Raw import open_rrsd
 from nisar.workflows import focus as nisar_focus
 
-import hyp3_isce3
 from hyp3_isce3.crop_rslc import _snap_to_grid, get_multilook_looks, solve_aoi_corners
 
 
@@ -40,8 +39,6 @@ log = logging.getLogger(__name__)
 BLOCK_PULSES = 2048
 # Lines/samples added around the AOI, so the GUNW workflow's crop window (its own 512 margin) fits inside.
 MARGIN_SAMPLES = 512
-# The GUNW runconfig whose multilook looks set the lattice a subset grid must start on (see snap_to_full_frame).
-GUNW_FALLBACK = Path(hyp3_isce3.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
 
 
 class OutputGrid(TypedDict):
@@ -229,17 +226,21 @@ def snap_to_full_frame(
     }
 
 
-def output_grid_for_aoi(cfg: nisar_focus.Struct, subset: list[float], geometry: FocusGeometry) -> OutputGrid:
+def output_grid_for_aoi(
+    cfg: nisar_focus.Struct, subset: list[float], geometry: FocusGeometry, gunw_yaml: Path
+) -> OutputGrid:
     """Map an AOI onto the focus output grid: its zero-Doppler time and slant-range spans.
 
     The four AOI corners are solved into radar coordinates with geo2rdr at their DEM heights (the
     GUNW crop's corner solve), padded by MARGIN_SAMPLES, and snapped outward onto the full-frame
-    grid's multilook lattice (snap_to_full_frame), with the blocks from the GUNW runconfig's looks.
+    grid's multilook lattice (snap_to_full_frame), with the blocks from the frame's GUNW runconfig looks.
 
     Args:
         cfg: The loaded runconfig's groups, naming the skeleton and carrying the frame's output grid.
         subset: AOI bounding box [LON_MIN, LAT_MIN, LON_MAX, LAT_MAX] in WGS84 degrees.
         geometry: focus_geometry(cfg).
+        gunw_yaml: The GUNW runconfig the GUNW workflow will use on this frame (process.download_yaml), whose
+            looks set the lattice; production frames differ in range looks by mode.
 
     Returns:
         The output_grid fields to set: start_time, end_time, start_range, end_range.
@@ -249,7 +250,7 @@ def output_grid_for_aoi(cfg: nisar_focus.Struct, subset: list[float], geometry: 
 
     # Blocks: the lcm of the GUNW looks on every band, in this grid's lines and samples. Frequency B's
     # samples are every rskip-th of the reference band's, so its range looks count rskip samples each.
-    az_step, rg_step, rg_looks_b = get_multilook_looks(GUNW_FALLBACK)
+    az_step, rg_step, rg_looks_b = get_multilook_looks(gunw_yaml)
     dr = grid.range_pixel_spacing
     rskips = [int(np.round(spacing / dr)) for spacing in geometry.range_spacings.values()]
     rg_block = math.lcm(rg_step, *(rg_looks_b * rskip for rskip in rskips if rskip > 1))

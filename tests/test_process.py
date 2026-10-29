@@ -231,7 +231,7 @@ def test_download_yaml_fallback(monkeypatch, tmp_path):
         raise ValueError('no granules')
 
     monkeypatch.setattr(process, 'search_nisar', no_gunw)
-    template = download_yaml(f'{REFERENCE}.h5')
+    template = download_yaml('019_A_011')
     fallback = Path(process.__file__).parent / 'schemas' / 'gunw_fallback.yaml'
     assert template == Path('temp.yaml')
     assert template.read_text() == fallback.read_text()

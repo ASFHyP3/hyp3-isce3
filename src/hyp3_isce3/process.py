@@ -193,16 +193,17 @@ def get_config(
     return yaml_file
 
 
-def download_yaml(reference_path: str) -> Path:
-    """Download reference configuration file for GUNW.
+def download_yaml(keyword: str) -> Path:
+    """Download the production GUNW runconfig for a frame, or copy the fallback when there is none.
+
+    The subset focus calls this too, so it snaps to the same multilook looks this workflow will use.
 
     Args:
-        reference_path: Path of the reference scene.
+        keyword: track_direction_frame of the frame, e.g. '085_D_069'.
 
     Returns:
         tmp_yaml: Path of the yaml file.
     """
-    keyword = decode_rslc_name(reference_path)['search_keyword']
     try:
         results = search_nisar('L2', 'GUNW', granule_name=f'*{keyword}*')
     except ValueError:
@@ -445,7 +446,7 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # multilook looks the crop aligns to; download once and reuse for both.
-    template_yaml = download_yaml(reference_path)
+    template_yaml = download_yaml(decode_rslc_name(reference_path)['search_keyword'])
 
     # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
     # small patch; the crop floors its origin to the multilook looks (see crop_rslc).

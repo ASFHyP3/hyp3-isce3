@@ -7,6 +7,7 @@ import h5py
 import isce3
 import numpy as np
 import pytest
+import yaml
 from isce3.noise.noise_power_est_func import cpi_slice_gen
 from nisar.workflows import focus as nisar_focus
 
@@ -267,3 +268,43 @@ def test_read_filled_pulses_needs_exactly_one_total_bounds_call(monkeypatch):
         with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
             nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
             nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
+
+
+def gunw_yaml(path, crossmul, unwrap):
+    """A GUNW runconfig holding only the crossmul and phase_unwrap looks (range, azimuth)."""
+    looks = {
+        'crossmul': {'range_looks': crossmul[0], 'azimuth_looks': crossmul[1]},
+        'phase_unwrap': {'range_looks': unwrap[0], 'azimuth_looks': unwrap[1]},
+    }
+    path.write_text(yaml.safe_dump({'runconfig': {'groups': {'processing': looks}}}))
+    return path
+
+
+@pytest.mark.parametrize(
+    ('crossmul', 'unwrap', 'rskip_b', 'rg_block'),
+    [
+        ((5, 6), (13, 16), 8, 520),  # 40+5 MHz (gunw_fallback.yaml): lcm(65, 13 * 8)
+        ((3, 6), (7, 16), 4, 84),  # 20+5 MHz production: lcm(21, 7 * 4)
+    ],
+)
+def test_output_grid_for_aoi_snaps_to_the_given_gunw_looks(monkeypatch, tmp_path, crossmul, unwrap, rskip_b, rg_block):
+    grid = isce3.product.RadarGridParameters(
+        100.0, 0.24, 1520.0, 900000.0, 3.0, 'left', 100000, 20000, isce3.core.DateTime('2025-11-04T00:00:00')
+    )
+    geometry = cast(
+        subset.FocusGeometry, SimpleNamespace(grid=grid, orbit=None, range_spacings={'A': 3.0, 'B': 3.0 * rskip_b})
+    )
+    cfg = SimpleNamespace(dynamic_ancillary_file_group=SimpleNamespace(dem_file='dem.tif'))
+    # AOI corners at lines 30000-31000 and samples 5003-6001 of the full-frame grid.
+    monkeypatch.setattr(
+        subset,
+        'solve_aoi_corners',
+        lambda orbit, grid, aoi, dem: (
+            [100.0 + 30000 / 1520, 100.0 + 31000 / 1520],
+            [900000.0 + 5003 * 3.0, 900000.0 + 6001 * 3.0],
+        ),
+    )
+    out = subset.output_grid_for_aoi(cfg, [0, 0, 1, 1], geometry, gunw_yaml(tmp_path / 'gunw.yaml', crossmul, unwrap))
+    start_sample = (out['start_range'] - grid.starting_range) / grid.range_pixel_spacing
+    assert start_sample == round(start_sample) and round(start_sample) % rg_block == 0
+    assert round(start_sample) > 5003 - subset.MARGIN_SAMPLES - rg_block  # the nearest block corner, not further
