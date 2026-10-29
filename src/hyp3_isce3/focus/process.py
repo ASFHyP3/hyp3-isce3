@@ -5,7 +5,7 @@ import contextlib
 import logging
 import zipfile
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import earthaccess
@@ -21,9 +21,22 @@ from nisar.products.readers.Raw.Raw import RawBase
 from nisar.products.readers.orbit import load_orbit_from_xml
 from nisar.workflows import focus as nisar_focus
 
+from hyp3_isce3.cli import nullable_subset_list, parse_subset
 from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.focus.ancillary import download_latest_ancillaries, download_named_ancillaries
 from hyp3_isce3.focus.inputs import decode_l0b_name, download_l0b, find_l0b, get_template, l0b_footprint
+from hyp3_isce3.focus.subset import (
+    fill_pulses,
+    focus_geometry,
+    open_remote_l0b,
+    output_grid_for_aoi,
+    plan_pulses,
+    production_rfi_blocks,
+    read_filled_pulses,
+    to_datetime,
+    write_skeleton,
+)
+from hyp3_isce3.process import download_yaml
 
 
 log = logging.getLogger(__name__)
@@ -128,7 +141,7 @@ def get_frame_times(l0b_path: str, orbit_path: str, track_frame_polygon: str) ->
         start, end = max(start, pulse_times[0]), min(end, pulse_times[-1])
 
     # Orbit times are seconds since its reference epoch; isce3 prints nanoseconds, Python keeps microseconds.
-    epoch = datetime.fromisoformat(orbit.reference_epoch.isoformat()[:26]).replace(tzinfo=UTC)
+    epoch = to_datetime(orbit.reference_epoch)
     start_time, end_time = epoch + timedelta(seconds=start), epoch + timedelta(seconds=end)
     # Round inward to whole seconds: an explicit start_time skips isce3's azimuth-grid snap, and whole
     # seconds sit on that grid (1/PRF from midnight), so the lines line up with the production RSLC's.
@@ -170,7 +183,9 @@ def only_polarizations(polarizations: list[str] | None) -> Iterator[None]:
         PolChannelSet.from_raw = from_raw
 
 
-def process_focus(l0b_name: str, frame: int, polarizations: list[str] | None = None) -> Path:
+def process_focus(
+    l0b_name: str, frame: int, polarizations: list[str] | None = None, subset: list[float] | None = None
+) -> Path:
     """Focus one frame of an L0B into an RSLC.
 
     Everything is staged and processed in a folder named for the L0B and frame, so several runs
@@ -180,6 +195,8 @@ def process_focus(l0b_name: str, frame: int, polarizations: list[str] | None = N
         l0b_name: Name of the L0B granule.
         frame: Frame number to focus.
         polarizations: Only focus these polarizations (e.g. ['HH']); None focuses every channel.
+        subset: Only focus this WGS84 bounding box [LON_MIN, LAT_MIN, LON_MAX, LAT_MAX], streaming
+            just the pulses it needs; None focuses the whole frame from the downloaded L0B.
 
     Returns:
         zip_path: Absolute path of the zip holding the RSLC h5 file and its runconfig.
@@ -187,17 +204,20 @@ def process_focus(l0b_name: str, frame: int, polarizations: list[str] | None = N
     run_dir = Path(f'{l0b_name}_F{frame:03d}').resolve()
     run_dir.mkdir(exist_ok=True)
     with contextlib.chdir(run_dir):
-        zip_name = _run_focus(l0b_name, frame, polarizations)
+        zip_name = _run_focus(l0b_name, frame, polarizations, subset)
     return run_dir / zip_name
 
 
-def _run_focus(l0b_name: str, frame: int, polarizations: list[str] | None = None) -> str:
+def _run_focus(
+    l0b_name: str, frame: int, polarizations: list[str] | None = None, subset: list[float] | None = None
+) -> str:
     """Stage the inputs, run the isce3 focus, and zip the RSLC, all in the current directory.
 
     Args:
         l0b_name: Name of the L0B granule.
         frame: Frame number to focus.
         polarizations: Only focus these polarizations (e.g. ['HH']); None focuses every channel.
+        subset: Only focus this WGS84 bounding box; None focuses the whole frame.
 
     Returns:
         zip_name: File name of the zip holding the RSLC h5 file and its runconfig.
@@ -209,8 +229,17 @@ def _run_focus(l0b_name: str, frame: int, polarizations: list[str] | None = None
     # A production frame can span two L0Bs; fetch every one its runconfig lists.
     l0b_names = [Path(p).stem for p in groups['input_file_group']['input_file_path']]
     l0b_granules = [find_l0b(name) for name in l0b_names]
-    l0b_paths = [download_l0b(granule) for granule in l0b_granules]
-    log.info(f'Downloaded L0B: {[Path(p).name for p in l0b_paths]}')
+    if subset:
+        if len(l0b_granules) > 1:
+            raise NotImplementedError('--subset is not supported on a frame focused from two L0Bs')
+        # Stream a skeleton (everything but the signal arrays) instead of the full L0B. It is the L0B
+        # for every step, and the AOI's pulses are streamed into it once the output grid is known.
+        with open_remote_l0b(l0b_granules[0]) as remote:
+            skeleton = str(write_skeleton(remote, f'{l0b_name}_skeleton.h5'))
+        l0b_paths = [skeleton]
+    else:
+        l0b_paths = [download_l0b(granule) for granule in l0b_granules]
+        log.info(f'Downloaded L0B: {[Path(p).name for p in l0b_paths]}')
 
     if is_production:
         ancillaries = download_named_ancillaries(groups['dynamic_ancillary_file_group'])
@@ -236,8 +265,36 @@ def _run_focus(l0b_name: str, frame: int, polarizations: list[str] | None = None
     yaml_path = get_config(template_yaml, l0b_paths, ancillaries, dem_path)
     template_yaml.unlink()  # consumed by the input lookups and the config build
 
+    reads: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
+    if subset:
+        runconfig = yaml.safe_load(yaml_path.read_text())
+        cfg = nisar_focus.load_config(str(yaml_path)).runconfig.groups
+        geometry = focus_geometry(cfg)
+
+        # 1. The tone-rank RFI blocks of the full-frame focus; the subset focus must tile the same pulses.
+        rfi_blocks = production_rfi_blocks(cfg, geometry, skeleton, polarizations)
+
+        # 2. Cut the output grid to the AOI: its zero-Doppler time span and slant-range span, snapped onto
+        #    the full-frame grid's multilook lattice so a subset GUNW matches a full-frame one. The lattice
+        #    uses the looks of the GUNW runconfig the GUNW workflow will pick for this frame.
+        l0b = decode_l0b_name(l0b_name)
+        gunw_yaml = download_yaml(f'{l0b["track"]}_{l0b["direction"]}_{frame:03d}')
+        output_grid = output_grid_for_aoi(cfg, subset, geometry, gunw_yaml)
+        gunw_yaml.unlink()
+        runconfig['runconfig']['groups']['processing']['output_grid'].update(output_grid)
+        yaml_path.write_text(yaml.safe_dump(runconfig, sort_keys=False))
+        del geometry  # holds the frame DEM, not needed during the focus
+
+        # 3. Stream the pulses that grid needs into the skeleton, which the focus then reads as the L0B.
+        #    Planned on the focused channels only, as the focus plans; steps 1-2 keep production's channels.
+        with only_polarizations(polarizations):
+            windows = plan_pulses(nisar_focus.load_config(str(yaml_path)).runconfig.groups, skeleton, rfi_blocks)
+        with open_remote_l0b(l0b_granules[0]) as remote:
+            fill_pulses(skeleton, windows, remote)
+        reads = read_filled_pulses(skeleton, windows, rfi_blocks)
+
     log.info(f'Running the isce3 focus workflow on the GPU, polarizations: {polarizations or "all"}')
-    with only_polarizations(polarizations):
+    with only_polarizations(polarizations), reads:
         nisar_focus.focus(nisar_focus.load_config(str(yaml_path)), str(yaml_path))
 
     output = Path('output/rslc.h5')
@@ -268,9 +325,17 @@ def main() -> None:
         nargs='+',
         help='Only focus these polarizations, in every frequency (e.g. HH for a GUNW-only run); default all',
     )
+    parser.add_argument(
+        '--subset',
+        type=nullable_subset_list,
+        nargs='*',
+        help='Optional WGS84 bounding box to focus only (LON_MIN LAT_MIN LON_MAX LAT_MAX); streams just its pulses. '
+        'On quad-pol L0Bs, also pass --polarizations with a single transmit (e.g. HH HV)',
+    )
     args = parser.parse_args()
+    args.subset = parse_subset(args.subset)
 
-    product_file = process_focus(args.granule, args.frame, args.polarizations)
+    product_file = process_focus(args.granule, args.frame, args.polarizations, args.subset)
 
     if args.bucket:
         upload_file_to_s3(product_file, args.bucket, args.bucket_prefix)

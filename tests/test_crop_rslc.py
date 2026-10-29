@@ -182,7 +182,7 @@ class TestAoiToRadarWindow:
         # multiple of 16 -> 16. frequencyA's start must be a multiple of 7 that is also a
         # frequencyB sample (every 8th) whose B index is a multiple of 7, i.e. a multiple of 56 -> 0.
         monkeypatch.setattr(
-            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+            crop_mod, 'solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
         )
         window = crop_mod.aoi_to_radar_window(
             self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=16, rg_looks=7
@@ -195,7 +195,7 @@ class TestAoiToRadarWindow:
     def test_looks_of_one_is_no_snap(self, rslc_h5, monkeypatch):
         # With looks of 1 only the band alignment applies: 32 is already a frequencyB sample (B index 4).
         monkeypatch.setattr(
-            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+            crop_mod, 'solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
         )
         window = crop_mod.aoi_to_radar_window(
             self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=1, rg_looks=1
@@ -206,7 +206,7 @@ class TestAoiToRadarWindow:
     def test_band_windows_start_at_same_slant_range(self, rslc_h5, monkeypatch):
         # The split-band ionosphere step needs each band to start at the same slant range.
         monkeypatch.setattr(
-            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+            crop_mod, 'solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
         )
         for rg_looks in (1, 3, 7):
             window = crop_mod.aoi_to_radar_window(
@@ -221,7 +221,7 @@ class TestAoiToRadarWindow:
     def test_frequency_b_uses_its_own_looks(self, rslc_h5, monkeypatch):
         # frequencyB's start must be a multiple of rg_looks_b (its unwrap looks), not rg_looks.
         monkeypatch.setattr(
-            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
+            crop_mod, 'solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [36.0, 36.0, 60.0, 60.0])
         )
         window = crop_mod.aoi_to_radar_window(
             self._stub_slc(rslc_h5), [0.0, 0.0, 1.0, 1.0], '', margin=MARGIN, az_looks=1, rg_looks=1, rg_looks_b=3
@@ -233,7 +233,7 @@ class TestAoiToRadarWindow:
     def test_overrun_warns(self, rslc_h5, monkeypatch, caplog):
         # Range extent reaches below the swath start -> clamped, with a warning.
         monkeypatch.setattr(
-            crop_mod, '_solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [-10.0, -10.0, 60.0, 60.0])
+            crop_mod, 'solve_aoi_corners', lambda *a, **k: ([30.0, 30.0, 50.0, 50.0], [-10.0, -10.0, 60.0, 60.0])
         )
         with caplog.at_level(logging.WARNING):
             crop_mod.aoi_to_radar_window(

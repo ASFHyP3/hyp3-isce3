@@ -3,7 +3,6 @@
 import argparse
 import contextlib
 import logging
-import math
 import shutil
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -20,7 +19,8 @@ from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 
 import hyp3_isce3
-from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, stream_skeleton
+from hyp3_isce3.cli import nullable_subset_list, parse_subset
+from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, get_multilook_looks, stream_skeleton
 from hyp3_isce3.crop_tropo import crop_tropo
 from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.search import find_rslc, search_nisar
@@ -193,41 +193,17 @@ def get_config(
     return yaml_file
 
 
-def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
-    """Read the crop snapping steps from the runconfig's crossmul and phase_unwrap looks.
+def download_yaml(keyword: str) -> Path:
+    """Download the production GUNW runconfig for a frame, or copy the fallback when there is none.
 
-    The wrapped interferogram is multilooked at the crossmul looks, and the unwrapped layers
-    (and the ionosphere step, for both bands) at the phase_unwrap looks, all counted from the
-    first line/sample. The RSLC crop floors its window origin to a multiple of both so every
-    multilook grid coincides with a full-frame run. Sourcing them from the same runconfig the
-    workflow runs guarantees the two never drift. If looks are ever exposed as a
-    user/processing parameter, read that parameter here instead so the crop tracks it.
+    The subset focus calls this too, so it snaps to the same multilook looks this workflow will use.
 
     Args:
-        template_yaml: Path of the downloaded JPL runconfig (from :func:`download_yaml`).
-
-    Returns:
-        az_step: Azimuth snap step, the lcm of the crossmul and phase_unwrap azimuth looks.
-        rg_step: frequencyA range snap step, the lcm of the crossmul and phase_unwrap range looks.
-        rg_looks_b: frequencyB range looks, the phase_unwrap range looks the ionosphere step uses.
-    """
-    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
-    crossmul, unwrap = processing['crossmul'], processing['phase_unwrap']
-    az_step = math.lcm(int(crossmul['azimuth_looks']), int(unwrap['azimuth_looks']))
-    rg_step = math.lcm(int(crossmul['range_looks']), int(unwrap['range_looks']))
-    return az_step, rg_step, int(unwrap['range_looks'])
-
-
-def download_yaml(reference_path: str) -> Path:
-    """Download reference configuration file for GUNW.
-
-    Args:
-        reference_path: Path of the reference scene.
+        keyword: track_direction_frame of the frame, e.g. '085_D_069'.
 
     Returns:
         tmp_yaml: Path of the yaml file.
     """
-    keyword = decode_rslc_name(reference_path)['search_keyword']
     try:
         results = search_nisar('L2', 'GUNW', granule_name=f'*{keyword}*')
     except ValueError:
@@ -470,7 +446,7 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
 
     # The JPL runconfig is both our config template (its tail) and the source of the
     # multilook looks the crop aligns to; download once and reuse for both.
-    template_yaml = download_yaml(reference_path)
+    template_yaml = download_yaml(decode_rslc_name(reference_path)['search_keyword'])
 
     # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
     # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
@@ -548,20 +524,6 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
     return f'{granule_id}.zip'
 
 
-def nullable_subset_list(subset_string: str) -> list[str]:
-    """Returns a list of the subset.
-
-    Args:
-        subset_string: input string with the subset coordinates.
-
-    Returns:
-        subset_list: List of coordinates.
-    """
-    subset_string = subset_string.replace('None', '').strip()
-    subset_list = [coord for coord in subset_string.split(' ') if coord]
-    return subset_list
-
-
 def main() -> None:
     """Entrypoint for the GUNW workflow (++process gunw)."""
     parser = argparse.ArgumentParser()
@@ -589,13 +551,7 @@ def main() -> None:
     if len(args.granules) != 2:
         parser.error('Must provide exactly two granules')
 
-    if args.subset is not None:
-        args.subset = [float(item) for sublist in args.subset for item in sublist]
-
-        if len(args.subset) == 0:
-            args.subset = None
-        elif len(args.subset) != 4:
-            raise ValueError('The number of coordinates is not four')
+    args.subset = parse_subset(args.subset)
 
     # process_isce3 orders the pair itself (earlier acquisition becomes the reference).
     granule_1, granule_2 = args.granules

@@ -23,6 +23,18 @@ python -m hyp3_isce3 \
   --subset 40.55 13.46 40.78 13.65
 ```
 
+### Focusing an L0B
+
+`++process focus_l0b` focuses one frame of a NISAR L0B into an RSLC on a GPU. With `--subset`, only the
+bounding box is focused and only the pulses it needs are streamed from the archive instead of
+downloading the L0B:
+
+```
+python -m hyp3_isce3 ++process focus_l0b \
+  NISAR_L0_PR_RRSD_004_085_D_156S_20251104T023255_20251104T023345_P05023_F_J_001 \
+  --frame 72 --subset -115.3 32.3 -115.1 32.5
+```
+
 ### Earthdata Login Credentials
 
 The user must provide their Earthdata Login credentials in order to download input data.

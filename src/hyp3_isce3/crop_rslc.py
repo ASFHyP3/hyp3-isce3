@@ -153,7 +153,7 @@ def _nested_band_window(
     return (start, p1), (side_start, side_stop)
 
 
-def _solve_aoi_corners(
+def solve_aoi_corners(
     orbit: isce3.core.Orbit,
     radar_grid: isce3.product.RadarGridParameters,
     bbox_wgs84: list[float],
@@ -245,7 +245,7 @@ def aoi_to_radar_window(
     # (geometry is shared across frequencies, and frequencyA is always present).
     radar_grid = slc.getRadarGrid('A')
     freq_groups = [f'frequency{x}' for x in slc.frequencies]
-    az_times, slant_ranges = _solve_aoi_corners(slc.getOrbit(), radar_grid, bbox_wgs84, dem_file)
+    az_times, slant_ranges = solve_aoi_corners(slc.getOrbit(), radar_grid, bbox_wgs84, dem_file)
 
     # Read the stored swath axes (independent of the radar grid, so the epoch
     # check below is a real cross-check) and window each one.
@@ -335,6 +335,29 @@ def geocode_subset_box(
     ymin = _snap_to_grid(ymin, py, ay)
     ymax = _snap_to_grid(ymax, py, ay, expand_up=True)
     return xmin, ymin, xmax, ymax
+
+
+def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
+    """Read the crop snapping steps from the runconfig's crossmul and phase_unwrap looks.
+
+    The wrapped interferogram is multilooked at the crossmul looks, and the unwrapped layers
+    (and the ionosphere step, for both bands) at the phase_unwrap looks, all counted from the
+    first line/sample. The RSLC crop and the subset focus floor their window origin to a multiple
+    of both so every multilook grid coincides with a full-frame run.
+
+    Args:
+        template_yaml: Path of a GUNW runconfig.
+
+    Returns:
+        az_step: Azimuth snap step, the lcm of the crossmul and phase_unwrap azimuth looks.
+        rg_step: frequencyA range snap step, the lcm of the crossmul and phase_unwrap range looks.
+        rg_looks_b: frequencyB range looks, the phase_unwrap range looks the ionosphere step uses.
+    """
+    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
+    crossmul, unwrap = processing['crossmul'], processing['phase_unwrap']
+    az_step = math.lcm(int(crossmul['azimuth_looks']), int(unwrap['azimuth_looks']))
+    rg_step = math.lcm(int(crossmul['range_looks']), int(unwrap['range_looks']))
+    return az_step, rg_step, int(unwrap['range_looks'])
 
 
 def get_polarizations(slc: SLC) -> dict[str, list[str]]:
