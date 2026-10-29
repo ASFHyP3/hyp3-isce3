@@ -73,7 +73,7 @@ class FakeRemoteFile:
 
     def __init__(self, path):
         self.path = path
-        self.handle = path.open('rb')  # noqa: SIM115
+        self.handle = path.open('rb')
         self.closed = False
 
     def __getattr__(self, name):
@@ -104,9 +104,8 @@ def test_open_remote_l0b_without_the_h5_closes_and_raises(tmp_path, monkeypatch)
     qa.write_bytes(b'')
     files = [FakeRemoteFile(qa)]
     monkeypatch.setattr(subset.earthaccess, 'open', lambda granules: files)
-    with pytest.raises(RuntimeError, match='No l0b.h5'):
-        with subset.open_remote_l0b(GRANULE):
-            pass
+    with pytest.raises(RuntimeError, match='No l0b.h5'), subset.open_remote_l0b(GRANULE):
+        pass
     assert files[0].closed
 
 
@@ -251,9 +250,11 @@ def test_read_filled_pulses_refuses_unfilled_pulses_and_restores(monkeypatch):
     with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
         assert nisar_focus.total_bounds([(None, (t[1500], t[2000]))]) == (t[1500], t[2000])
     assert nisar_focus.total_bounds is original
-    with pytest.raises(ValueError, match='outside the streamed'):
-        with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
-            nisar_focus.total_bounds([(None, (t[900], t[2000]))])
+    with (
+        pytest.raises(ValueError, match='outside the streamed'),
+        subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None),
+    ):
+        nisar_focus.total_bounds([(None, (t[900], t[2000]))])
     assert nisar_focus.total_bounds is original
 
 
@@ -261,13 +262,17 @@ def test_read_filled_pulses_needs_exactly_one_total_bounds_call(monkeypatch):
     monkeypatch.setattr(subset, 'open_rrsd', lambda path: QuadPolRaw())
     monkeypatch.setattr(nisar_focus, 'get_total_grid_bounds', lambda paths: (None,))
     t = np.arange(5000) / 1000.0
-    with pytest.raises(RuntimeError, match='0 times'):
-        with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
-            pass
-    with pytest.raises(RuntimeError, match='2 times'):
-        with subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None):
-            nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
-            nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
+    with (
+        pytest.raises(RuntimeError, match='0 times'),
+        subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None),
+    ):
+        pass
+    with (
+        pytest.raises(RuntimeError, match='2 times'),
+        subset.read_filled_pulses('skeleton.h5', {'H': (1000, 2001)}, None),
+    ):
+        nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
+        nisar_focus.total_bounds([(None, (t[1500], t[2000]))])
 
 
 def gunw_yaml(path, crossmul, unwrap):
