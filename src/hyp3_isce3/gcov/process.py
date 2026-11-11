@@ -124,14 +124,12 @@ def get_config(
 
     # Keep production's CRID, product versions, and DOIs; label the product as ASF on-demand.
     executable = groups['primary_executable']
-    # Write RIFG and RUNW alongside the GUNW as output/<PRODUCT>_product.h5 (with 'GUNW' alone,
-    # isce3 puts them in scratch and the GUNW at sas_output_file), which process_isce3 expects.
     executable['product_type'] = 'GCOV'
     # isce3 records 'OD' (on-demand) as processingType 'Custom'; production's 'PR' would read 'Nominal'.
     executable['processing_type'] = 'OD'
     executable['processing_center'] = 'A'
     # isce3 fills the {...} tokens; the rest identifies this pair (reference cycle, track,
-    # direction, frame, secondary cycle) and the release, as in a production GUNW name.
+    # direction, frame, secondary cycle) and the release, as in a production GCOV name.
     rslc = decode_rslc_name(rslc_path)
     crid, accuracy, coverage = rslc['center'].split('_')[:3]
     # A subset covers only part of the frame, so mark it partial ('P') per the NISAR naming convention.
@@ -166,7 +164,7 @@ def get_config(
 
 
 def download_yaml(keyword: str) -> Path:
-    """Download the production GUNW runconfig for a frame, or copy the fallback when there is none.
+    """Download the production GCOV runconfig for a frame, or copy the fallback when there is none.
 
     The subset focus calls this too, so it snaps to the same multilook looks this workflow will use.
 
@@ -179,7 +177,7 @@ def download_yaml(keyword: str) -> Path:
     try:
         results = search_nisar('L2', 'GCOV', granule_name=f'*{keyword}*')
     except ValueError:
-        # No production GUNW on this frame yet; use the shipped runconfig instead. Copy it,
+        # No production GCOV on this frame yet; use the shipped runconfig instead. Copy it,
         # since the caller deletes temp.yaml once it is consumed.
         log.warning(f'No production GCOV config found for frame {keyword}; using the fallback runconfig.')
         fallback = Path(hyp3_isce3.__file__).parent / 'schemas' / 'gcov_fallback.yaml'
@@ -206,10 +204,10 @@ def process_gcov(
         scene: Name of the reference scene.
         polarizations: List of polarizations to process.
         frequencies: List of frequencies to process - can be 'A' and/or 'B'.
-        subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
+        subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GCOV.
 
     Returns:
-        h5file: Path of the GUNW h5file.
+        h5file: Path of the GCOV h5file.
     """
     earthaccess.login()
 
@@ -288,7 +286,7 @@ def main() -> None:
     parser.add_argument(
         '--polarizations',
         nargs='+',
-        help='Only focus these polarizations, in every frequency (e.g. HH for a GUNW-only run); default all',
+        help='Only focus these polarizations, in every frequency (e.g. HH); default all',
     )
     parser.add_argument(
         '--subset',
