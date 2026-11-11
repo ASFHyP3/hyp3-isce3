@@ -9,21 +9,20 @@ import asf_search as asf
 import earthaccess
 import yaml
 from hyp3lib.aws import upload_file_to_s3
-from nisar.workflows import gcov, h5_prep
+from nisar.workflows import gcov
 from nisar.workflows.gcov_runconfig import GCOVRunConfig
 
 import hyp3_isce3
 from hyp3_isce3.cli import nullable_subset_list, parse_subset
 from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.process import (
-    decode_rslc_name,
-    download_yaml,
-    get_orbit,
-    get_epsg_code,
-    get_tec,
     crop_streamed,
-    get_multilook_looks,
+    decode_rslc_name,
     geocode_subset_box,
+    get_epsg_code,
+    get_multilook_looks,
+    get_orbit,
+    get_tec,
     stream_skeleton,
 )
 from hyp3_isce3.search import find_rslc, search_nisar
@@ -37,6 +36,8 @@ def download_rslc(granule_name: str, bucket: str | None = None, bucket_prefix: s
 
     Args:
         granule_name: Name of the scene, or the path of a local RSLC h5 file.
+        bucket: An optional bucket containing the product to be downloaded.
+        bucket_prefix: An optional bucket prefix where the product to be downloaded is located.
 
     Returns:
         h5file_path: Path of the h5 file.
@@ -61,7 +62,7 @@ def get_config(
     dem_path: str,
     tec_path: str,
     template_yaml: Path,
-    frequencies: list[str] = ['A', 'B'],
+    frequencies: list[str],
     subset_utm: tuple[float, float, float, float] | None = None,
     output_epsg: int | None = None,
     polarizations: list[str] | None = None,
@@ -79,11 +80,12 @@ def get_config(
         dem_path: Path of the DEM file.
         tec_path: Path of the TEC file for the reference scene.
         template_yaml: Path of the downloaded production runconfig (from :func:`download_yaml`).
+        frequencies: List of frequencies to process - can be 'A' and/or 'B'.
         subset_utm: Optional (xmin, ymin, xmax, ymax) output box in UTM meters.
         output_epsg: EPSG code of ``subset_utm``; written into the geocode blocks so the corners and projection stay consistent.
             Without a subset it fills only a blank output_epsg (as in the fallback runconfig).
-        frequencies: List of frequencies to process - can be 'A' and/or 'B'.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GCOV.
+        polarizations: The desired polarizations to process.
 
     Returns:
         yaml_file: Path of the configuration file.
@@ -116,7 +118,7 @@ def get_config(
         'qa_output_dir': 'qa_gcov',
     }
 
-    for freq in frequencies:        
+    for freq in frequencies:
         if polarizations:
             groups['processing']['input_subset']['list_of_frequencies'][freq] = polarizations
         else:
@@ -196,10 +198,10 @@ def download_yaml(keyword: str) -> Path:
 
 def process_gcov(
     scene: str,
-    frequencies: list[str] = ['A', 'B'],
+    frequencies: list[str],
     polarizations: list[str] | None = None,
     subset: list[float] | None = None,
-):
+) -> Path:
     """Get Polygon for reference scene.
 
     Args:
