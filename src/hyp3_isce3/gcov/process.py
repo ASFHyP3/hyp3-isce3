@@ -118,11 +118,9 @@ def get_config(
         'qa_output_dir': 'qa_gcov',
     }
 
-    for freq in frequencies:
-        if polarizations:
-            groups['processing']['input_subset']['list_of_frequencies'][freq] = polarizations
-        else:
-            groups['processing']['input_subset']['list_of_frequencies'][freq] = ''
+    input_subset = {freq: polarizations if polarizations else '' for freq in frequencies}
+
+    groups['processing']['input_subset']['list_of_frequencies'] = input_subset
 
     # Keep production's CRID, product versions, and DOIs; label the product as ASF on-demand.
     executable = groups['primary_executable']
@@ -285,6 +283,7 @@ def main() -> None:
         '--frequencies',
         nargs='+',
         help='Only focus these frequencies, "A" for full bandwidth and "B" for 5MHz band; default all.',
+        default=['A', 'B'],
     )
     parser.add_argument(
         '--polarizations',
@@ -303,9 +302,8 @@ def main() -> None:
     args.subset = parse_subset(args.subset)
 
     if args.granule.split('_')[8] == '0505':
+        log.info('Detected 5MHz product, only frequency B will be processed.')
         frequencies = ['B']
-    else:
-        frequencies = args.frequencies if args.frequencies else ['A', 'B']
 
     product_file = process_gcov(args.granule, frequencies, args.polarizations, args.subset)
 
