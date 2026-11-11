@@ -251,10 +251,10 @@ def process_gcov(
         dem_path,
         tec_path,
         template_yaml,
+        frequencies,
         subset_utm,
         epsg_code,
         polarizations,
-        frequencies,
     )
     template_yaml.unlink()  # consumed by the looks read and the config build
 
