@@ -214,7 +214,7 @@ def process_gcov(
     try:
         orbit_path = get_orbit(scene)
     except RuntimeError:
-        orbit_path = None
+        orbit_path = ''
 
     if subset:
         # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
