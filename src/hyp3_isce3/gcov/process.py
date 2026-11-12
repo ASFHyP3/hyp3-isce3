@@ -270,16 +270,15 @@ def process_gcov(
 
 
 def main() -> None:
-    """Entrypoint for the L0B focus workflow (++process focus_l0b)."""
+    """Entrypoint for the RSLC to GCOV workflow (++process gcov)."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--bucket', help='AWS S3 bucket HyP3 for upload the final product(s)')
     parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
-    parser.add_argument('granule', help='NISAR L0B (RRSD) granule name')
+    parser.add_argument('granule', help='NISAR RSLC granule name')
     parser.add_argument(
-        '--frequencies',
-        nargs='+',
+        '--frequency',
         help='Only focus these frequencies, "A" for full bandwidth and "B" for 5MHz band; default all.',
-        default=['A', 'B'],
+        default=None,
     )
     parser.add_argument(
         '--polarizations',
@@ -297,9 +296,14 @@ def main() -> None:
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)
 
-    if args.granule.split('_')[8] == '0505':
-        log.info('Detected 5MHz product, only frequency B will be processed.')
-        frequencies = ['B']
+    if not args.frequency:
+        if args.granule.split('_')[8] == '0505':
+            log.info('Detected 5MHz product, only frequency B will be processed.')
+            frequencies = ['B']
+        else:
+            frequencies = ['A', 'B']
+    else:
+        frequencies = [args.frequency]
 
     product_file = process_gcov(args.granule, frequencies, args.polarizations, args.subset)
 
