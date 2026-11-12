@@ -237,8 +237,7 @@ def process_gcov(
         # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
         # decorrelated areas).
         subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
-        az_step, rg_step, rg_looks_b = get_multilook_looks(template_yaml)
-        looks = {'az_looks': az_step, 'rg_looks': rg_step, 'rg_looks_b': rg_looks_b}
+        looks = {'az_looks': 1, 'rg_looks': 1, 'rg_looks_b': 1}
         # Stream each RSLC's AOI window into a cropped <scene>.h5, windowed
         # independently from its own orbit; only overlapping image chunks are pulled.
         rslc_path = crop_streamed(scene, rslc_path, subset, dem_path, **looks)
