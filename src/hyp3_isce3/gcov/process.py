@@ -45,7 +45,7 @@ def download_rslc(granule_name: str, bucket: str | None = None, bucket_prefix: s
     if Path(granule_name).is_file():
         return granule_name
     # Same lookup as the streaming path; keep only the .h5 in case the granule ships other files.
-    if bucket and bucket_prefix:
+    if bucket and bucket_prefix: # TODO:
         pass
     else:
         files = earthaccess.download([find_rslc(granule_name)])
