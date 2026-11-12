@@ -58,7 +58,7 @@ def download_rslc(granule_name: str, bucket: str | None = None, bucket_prefix: s
 
 def get_config(
     rslc_path: str,
-    orbit_path: str,
+    orbit_path: str | None,
     dem_path: str,
     tec_path: str,
     template_yaml: Path,
@@ -118,7 +118,7 @@ def get_config(
         'qa_output_dir': 'qa_gcov',
     }
 
-    input_subset = {freq: polarizations if polarizations else '' for freq in frequencies}
+    input_subset = {freq: polarizations if polarizations else None for freq in frequencies}
 
     groups['processing']['input_subset']['list_of_frequencies'] = input_subset
 
@@ -214,7 +214,7 @@ def process_gcov(
     try:
         orbit_path = get_orbit(scene)
     except RuntimeError:
-        orbit_path = ''
+        orbit_path = None
 
     if subset:
         # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
