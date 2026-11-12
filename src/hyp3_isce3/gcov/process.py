@@ -20,7 +20,6 @@ from hyp3_isce3.process import (
     decode_rslc_name,
     geocode_subset_box,
     get_epsg_code,
-    get_multilook_looks,
     get_orbit,
     get_tec,
     stream_skeleton,
