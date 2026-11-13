@@ -30,13 +30,11 @@ from hyp3_isce3.search import find_rslc, search_nisar
 log = logging.getLogger(__name__)
 
 
-def download_rslc(granule_name: str, bucket: str | None = None, bucket_prefix: str | None = None) -> str:
+def download_rslc(granule_name: str) -> str:
     """Download RSLC product, or use it as is when it is already a local file.
 
     Args:
         granule_name: Name of the scene, or the path of a local RSLC h5 file.
-        bucket: An optional bucket containing the product to be downloaded.
-        bucket_prefix: An optional bucket prefix where the product to be downloaded is located.
 
     Returns:
         h5file_path: Path of the h5 file.
@@ -45,13 +43,10 @@ def download_rslc(granule_name: str, bucket: str | None = None, bucket_prefix: s
     if Path(granule_name).is_file():
         return granule_name
     # Same lookup as the streaming path; keep only the .h5 in case the granule ships other files.
-    if bucket and bucket_prefix: # TODO:
-        pass
-    else:
-        files = earthaccess.download([find_rslc(granule_name)])
-        h5_files = [f for f in files if str(f).endswith('.h5')]
-        if not h5_files:
-            raise RuntimeError(f'No .h5 file downloaded for {granule_name}')
+    files = earthaccess.download([find_rslc(granule_name)])
+    h5_files = [f for f in files if str(f).endswith('.h5')]
+    if not h5_files:
+        raise RuntimeError(f'No .h5 file downloaded for {granule_name}')
     return str(h5_files[0])
 
 
@@ -276,9 +271,10 @@ def main() -> None:
     parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
     parser.add_argument('granule', help='NISAR RSLC granule name')
     parser.add_argument(
-        '--frequency',
+        '--frequencies',
+        nargs='+',
         help='Only focus these frequencies, "A" for full bandwidth and "B" for 5MHz band; default all.',
-        default=None,
+        default=['A', 'B'],
     )
     parser.add_argument(
         '--polarizations',
@@ -296,14 +292,9 @@ def main() -> None:
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)
 
-    if not args.frequency:
-        if args.granule.split('_')[8] == '0505':
-            log.info('Detected 5MHz product, only frequency B will be processed.')
-            frequencies = ['B']
-        else:
-            frequencies = ['A', 'B']
-    else:
-        frequencies = [args.frequency]
+    if args.granule.split('_')[8] == '0505':
+        log.info('Detected 5MHz product, only frequency B will be processed.')
+        frequencies = ['B']
 
     product_file = process_gcov(args.granule, frequencies, args.polarizations, args.subset)
 
