@@ -134,7 +134,7 @@ def get_config(
     # Fall back to the RSLC's release if the template carries no CRID.
     executable['composite_release_id'] = executable.get('composite_release_id') or crid
     executable['partial_granule_id'] = (
-        f'NISAR_{{Level}}_OD_{{ProductType}}_{rslc["cycle"]}_{rslc["track"]}_'
+        f'NISAR_L2_OD_GCOV_{rslc["cycle"]}_{rslc["track"]}_'
         f'{rslc["direction"]}_{rslc["frame"]}_{{MODE}}_{{PO}}_'
         '{StartDateTime}_{EndDateTime}_'
         f'{executable["composite_release_id"]}_{accuracy}_{coverage}_A_001'
