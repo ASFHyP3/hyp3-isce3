@@ -1,15 +1,18 @@
-"""Focus a NISAR L0B into an RSLC on a GPU with the isce3 focus workflow."""
+"""Focus a GCOV into an RSLC on a GPU with the isce3 focus workflow."""
 
 import argparse
 import logging
 import shutil
+import zipfile
 from pathlib import Path
 
 import asf_search as asf
 import earthaccess
+import h5py
 import yaml
 from hyp3lib.aws import upload_file_to_s3
-from nisar.workflows import gcov
+from nisar.products.writers.GcovWriter import GcovWriter
+from nisar.workflows import gcov as gcov_workflow
 from nisar.workflows.gcov_runconfig import GCOVRunConfig
 
 import hyp3_isce3
@@ -69,16 +72,15 @@ def get_config(
     pattern for this pair, and (for subsets) the output grid.
 
     Args:
-        rslc_path: Path of the reference scene.
-        orbit_path: Path of the reference orbit.
+        rslc_path: Path of the RSLC scene.
+        orbit_path: Path of the orbit.
         dem_path: Path of the DEM file.
-        tec_path: Path of the TEC file for the reference scene.
+        tec_path: Path of the TEC file for the scene.
         template_yaml: Path of the downloaded production runconfig (from :func:`download_yaml`).
         frequencies: List of frequencies to process - can be 'A' and/or 'B'.
         subset_utm: Optional (xmin, ymin, xmax, ymax) output box in UTM meters.
         output_epsg: EPSG code of ``subset_utm``; written into the geocode blocks so the corners and projection stay consistent.
             Without a subset it fills only a blank output_epsg (as in the fallback runconfig).
-        subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GCOV.
         polarizations: The desired polarizations to process.
 
     Returns:
@@ -129,12 +131,12 @@ def get_config(
     # A subset covers only part of the frame, so mark it partial ('P') per the NISAR naming convention.
     if subset_utm:
         coverage = 'P'
-    # Fall back to the reference RSLC's release if the template carries no CRID.
+    # Fall back to the RSLC's release if the template carries no CRID.
     executable['composite_release_id'] = executable.get('composite_release_id') or crid
     executable['partial_granule_id'] = (
         f'NISAR_{{Level}}_OD_{{ProductType}}_{rslc["cycle"]}_{rslc["track"]}_'
         f'{rslc["direction"]}_{rslc["frame"]}_{{MODE}}_{{PO}}_'
-        '{RefStartDateTime}_{RefEndDateTime}_'
+        '{StartDateTime}_{EndDateTime}_'
         f'{executable["composite_release_id"]}_{accuracy}_{coverage}_A_001'
     )
 
@@ -151,6 +153,10 @@ def get_config(
         # Only the fallback runconfig has a blank geocode projection, and isce3 would otherwise take
         # the DEM's lat/lon EPSG; use the scene's UTM zone (isce3 copies it to radar_grid_cubes).
         groups['processing'].setdefault('geocode', {})['output_epsg'] = output_epsg
+        geocode = groups['processing']['geocode']
+        postings = geocode['output_posting'].values()
+        geocode['x_snap'] = max(posting['x_posting'] for posting in postings)
+        geocode['y_snap'] = max(posting['y_posting'] for posting in postings)
 
     yaml_file = Path('gcov.yaml')
     yaml_file.write_text(yaml.safe_dump(runconfig, sort_keys=False))
@@ -192,7 +198,7 @@ def process_gcov(
     polarizations: list[str] | None = None,
     subset: list[float] | None = None,
 ) -> Path:
-    """Get Polygon for reference scene.
+    """Create a GCOV product from an RSLC using ISCE3.
 
     Args:
         scene: Name of the reference scene.
@@ -227,9 +233,6 @@ def process_gcov(
     # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
     subset_utm = None
     if subset:
-        # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
-        # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
-        # decorrelated areas).
         subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
         looks = {'az_looks': 1, 'rg_looks': 1, 'rg_looks_b': 1}
         # Stream each RSLC's AOI window into a cropped <scene>.h5, windowed
@@ -255,13 +258,25 @@ def process_gcov(
     args = argparse.Namespace(run_config_path=str(yaml_path), log_file=False)
     gcov_runconfig = GCOVRunConfig(args)
 
-    gcov.run(cfg=gcov_runconfig.cfg)
+    _, orbit, timing_corrections = gcov_workflow.run(gcov_runconfig.cfg)
+
+    with GcovWriter(runconfig=gcov_runconfig, orbit=orbit, timing_corrections_dict=timing_corrections) as gcov_obj:
+        gcov_obj.populate_metadata()
 
     output = Path('output/gcov.h5')
     if not output.exists():
-        raise RuntimeError('The RSLC file was not written!')
+        raise RuntimeError('The GCOV file was not written!')
 
-    return output
+    with h5py.File(output, 'r') as gcov:
+        band = next(iter(gcov['science']))
+        granule_id = gcov[f'science/{band}/identification/granuleId'][()].decode()
+    output = output.rename(f'{granule_id}.h5')
+    yaml_path = yaml_path.rename(f'{granule_id}.rc.yaml')
+
+    with zipfile.ZipFile(f'{granule_id}.zip', 'w', zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.write(str(output))
+        zip_ref.write(str(yaml_path))
+    return f'{granule_id}.zip'
 
 
 def main() -> None:
@@ -271,15 +286,15 @@ def main() -> None:
     parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
     parser.add_argument('granule', help='NISAR RSLC granule name')
     parser.add_argument(
-        '--frequencies',
-        nargs='+',
-        help='Only focus these frequencies, "A" for full bandwidth and "B" for 5MHz band; default all.',
-        default=['A', 'B'],
+        '--frequency',
+        type=str,
+        help='Only process this frequency, "A" for full bandwidth and "B" for 5MHz band; default of None processes all.',
+        default=None,
     )
     parser.add_argument(
         '--polarizations',
         nargs='+',
-        help='Only focus these polarizations, in every frequency (e.g. HH); default all',
+        help='Only process these polarizations, in every frequency (e.g. HH); default all',
     )
     parser.add_argument(
         '--subset',
@@ -292,9 +307,14 @@ def main() -> None:
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)
 
-    if args.granule.split('_')[8] == '0505':
+    freqs = args.granule.split('_')[8]
+    if freqs == '0505' or freqs == '0005':
         log.info('Detected 5MHz product, only frequency B will be processed.')
         frequencies = ['B']
+    elif args.frequency:
+        frequencies = [args.frequency]
+    else:
+        frequencies = ['A', 'B']
 
     product_file = process_gcov(args.granule, frequencies, args.polarizations, args.subset)
 
