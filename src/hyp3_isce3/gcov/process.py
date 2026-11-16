@@ -21,36 +21,17 @@ from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.process import (
     crop_streamed,
     decode_rslc_name,
+    download_rslc,
     geocode_subset_box,
     get_epsg_code,
     get_orbit,
     get_tec,
     stream_skeleton,
 )
-from hyp3_isce3.search import find_rslc, search_nisar
+from hyp3_isce3.search import search_nisar
 
 
 log = logging.getLogger(__name__)
-
-
-def download_rslc(granule_name: str) -> str:
-    """Download RSLC product, or use it as is when it is already a local file.
-
-    Args:
-        granule_name: Name of the scene, or the path of a local RSLC h5 file.
-
-    Returns:
-        h5file_path: Path of the h5 file.
-    """
-    # A local RSLC (e.g. one focused with ++process focus_l0b) is not in CMR.
-    if Path(granule_name).is_file():
-        return granule_name
-    # Same lookup as the streaming path; keep only the .h5 in case the granule ships other files.
-    files = earthaccess.download([find_rslc(granule_name)])
-    h5_files = [f for f in files if str(f).endswith('.h5')]
-    if not h5_files:
-        raise RuntimeError(f'No .h5 file downloaded for {granule_name}')
-    return str(h5_files[0])
 
 
 def get_config(
@@ -197,14 +178,16 @@ def process_gcov(
     frequencies: list[str],
     polarizations: list[str] | None = None,
     subset: list[float] | None = None,
+    s3_uri: str | None = None,
 ) -> Path:
     """Create a GCOV product from an RSLC using ISCE3.
 
     Args:
-        scene: Name of the reference scene.
+        scene: Name of the reference scene or s3 URI for scene.
         polarizations: List of polarizations to process.
         frequencies: List of frequencies to process - can be 'A' and/or 'B'.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GCOV.
+        s3_uri: Optional S3 URI to download input RSLC from.
 
     Returns:
         h5file: Path of the GCOV h5file.
@@ -216,12 +199,14 @@ def process_gcov(
     except RuntimeError:
         orbit_path = None
 
+    download_path = s3_uri if s3_uri else scene
+
     if subset:
         # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
         # product in every pre-crop step, and the image window is streamed by crop_streamed.
-        rslc_path = str(stream_skeleton(scene))
+        rslc_path = str(stream_skeleton(download_path))
     else:
-        rslc_path = download_rslc(scene)
+        rslc_path = download_rslc(download_path)
 
     tec_path = get_tec(scene)
     epsg_code = get_epsg_code(rslc_path)
@@ -307,6 +292,12 @@ def main() -> None:
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)
 
+    scene = args.granule
+    s3_uri = None
+    if scene.startswith('s3'):
+        s3_uri = scene
+        scene = s3_uri.split('/')[-1]
+
     freqs = args.granule.split('_')[8]
     if freqs == '0505' or freqs == '0005':
         log.info('Detected 5MHz product, only frequency B will be processed.')
@@ -316,7 +307,7 @@ def main() -> None:
     else:
         frequencies = ['A', 'B']
 
-    product_file = process_gcov(args.granule, frequencies, args.polarizations, args.subset)
+    product_file = process_gcov(scene, frequencies, args.polarizations, args.subset, s3_uri=s3_uri)
 
     if args.bucket:
         upload_file_to_s3(product_file, args.bucket, args.bucket_prefix)

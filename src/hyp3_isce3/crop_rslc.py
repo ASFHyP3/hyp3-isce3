@@ -62,6 +62,7 @@ import earthaccess
 import h5py
 import isce3
 import numpy as np
+import s3fs
 import yaml
 from nisar.products.readers import SLC
 from pyproj import Transformer
@@ -635,7 +636,11 @@ def write_skeleton(src: h5py.File, skeleton_h5: str | Path) -> Path:
 def open_remote_rslc(scene_name: str) -> h5py.File:
     """Open a NISAR RSLC over byte-range as an h5py handle (no full download)."""
     # earthaccess.open() handles auth + the S3/HTTPS redirect and block-caches reads.
-    fileobj = earthaccess.open([find_rslc(scene_name)])[0]
+    if scene_name.startswith('s3'):
+        fs = s3fs.S3FileSystem(anon=False)
+        fileobj = fs.open(scene_name, mode='rb', block_size=8 * 1024 * 1024)
+    else:
+        fileobj = earthaccess.open([find_rslc(scene_name)])[0]
     return h5py.File(fileobj, 'r', driver='fileobj')
 
 
