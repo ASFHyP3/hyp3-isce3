@@ -409,11 +409,11 @@ runconfig:
                 # spacing will be taken from the input DEM.
                 output_posting:
                     A:
-                        x_posting: 0.00017966305682390427
-                        y_posting: 0.00017966305682390427
+                        x_posting: 20
+                        y_posting: 20
                     B:
-                        x_posting: 0.00071865222
-                        y_posting: 0.00071865222
+                        x_posting: 80
+                        y_posting: 80
 
                 # Snap-to-grid interval along the Y-direction, in same units as
                 # output EPSG `output_epsg`.
