@@ -3,12 +3,12 @@
 import argparse
 import logging
 import shutil
-import zipfile
 from pathlib import Path
 
 import asf_search as asf
 import earthaccess
 import h5py
+import s3fs
 import yaml
 from hyp3lib.aws import upload_file_to_s3
 from nisar.products.writers.GcovWriter import GcovWriter
@@ -258,10 +258,29 @@ def process_gcov(
     output = output.rename(f'{granule_id}.h5')
     yaml_path = yaml_path.rename(f'{granule_id}.rc.yaml')
 
-    with zipfile.ZipFile(f'{granule_id}.zip', 'w', zipfile.ZIP_DEFLATED) as zip_ref:
-        zip_ref.write(str(output))
-        zip_ref.write(str(yaml_path))
-    return f'{granule_id}.zip'
+    return f'{granule_id}.h5'
+
+
+def determine_granule_uri_from_bucket(bucket: str, prefix: str) -> str:
+    """Get the URI for a RSLC within a given bucket and bucket prefix.
+
+    Args:
+        bucket: AWS S3 bucket to search in.
+        prefix: AWS s3 prefix within the bucket to search in.
+
+    Returns: S3 URI of the granule
+    """
+    granule_folder = f's3://{bucket}/{prefix}'
+
+    log.info(f'Looking for granule in {granule_folder}')
+
+    s3_fs = s3fs.S3FileSystem(anon=False)
+    matches = s3_fs.glob(f'{bucket}/{prefix.rstrip("/")}/*.h5')
+
+    if not matches:
+        raise FileNotFoundError(f'No H5 file found in s3://{bucket}/{prefix}')
+
+    return f's3://{matches[0]}'
 
 
 def main() -> None:
@@ -269,7 +288,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--bucket', help='AWS S3 bucket HyP3 for upload the final product(s)')
     parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
-    parser.add_argument('granule', help='NISAR RSLC granule name')
+    parser.add_argument('granule', default='', help='NISAR RSLC granule name or S3 URI for the granule')
     parser.add_argument(
         '--frequency',
         type=str,
@@ -288,9 +307,19 @@ def main() -> None:
         help='Optional WGS84 bounding box to focus only (LON_MIN LAT_MIN LON_MAX LAT_MAX); streams just its pulses. '
         'On quad-pol L0Bs, also pass --polarizations with a single transmit (e.g. HH HV)',
     )
+    parser.add_argument(
+        '--retrieve-from-bucket',
+        type=bool,
+        default=False,
+        help='Optionally download the input RSLC from the provided S3 bucket and bucket prefix',
+    )
 
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)
+
+    if args.retrieve_from_bucket:
+        assert args.bucket and args.bucket_prefix
+        scene = determine_granule_uri_from_bucket(args.bucket, args.bucket_prefix)
 
     scene = args.granule
     s3_uri = None
