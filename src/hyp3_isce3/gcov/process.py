@@ -286,9 +286,9 @@ def determine_granule_uri_from_bucket(bucket: str, prefix: str) -> str:
 def main() -> None:
     """Entrypoint for the RSLC to GCOV workflow (++process gcov)."""
     parser = argparse.ArgumentParser()
+    parser.add_argument('--granule', default='', help='NISAR RSLC granule name or S3 URI for the granule')
     parser.add_argument('--bucket', help='AWS S3 bucket HyP3 for upload the final product(s)')
     parser.add_argument('--bucket-prefix', default='', help='Add a bucket prefix to product(s)')
-    parser.add_argument('granule', default='', help='NISAR RSLC granule name or S3 URI for the granule')
     parser.add_argument(
         '--frequency',
         type=str,
@@ -307,18 +307,15 @@ def main() -> None:
         help='Optional WGS84 bounding box to focus only (LON_MIN LAT_MIN LON_MAX LAT_MAX); streams just its pulses. '
         'On quad-pol L0Bs, also pass --polarizations with a single transmit (e.g. HH HV)',
     )
-    parser.add_argument(
-        '--retrieve-from-bucket',
-        type=bool,
-        default=False,
-        help='Optionally download the input RSLC from the provided S3 bucket and bucket prefix',
-    )
 
     args = parser.parse_args()
     args.subset = parse_subset(args.subset)
 
-    if args.retrieve_from_bucket:
-        assert args.bucket and args.bucket_prefix
+    if not args.granule:
+        try:
+            assert args.bucket and args.bucket_prefix
+        except AssertionError:
+            raise ValueError('Either `--granule` or `--bucket` and `--bucket-prefix` must be provided.')
         scene = determine_granule_uri_from_bucket(args.bucket, args.bucket_prefix)
 
     scene = args.granule
