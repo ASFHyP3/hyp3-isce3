@@ -360,6 +360,23 @@ def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
     return az_step, rg_step, int(unwrap['range_looks'])
 
 
+def get_processed_polarizations(template_yaml: Path) -> list[str] | None:
+    """Read the polarizations the runconfig processes, so the crop can leave the others out.
+
+    Args:
+        template_yaml: Path of a GUNW runconfig.
+
+    Returns:
+        The polarizations listed under input_subset.list_of_frequencies, or None when any
+        frequency is listed without polarizations (isce3 then processes all of them).
+    """
+    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
+    listed = (processing.get('input_subset') or {}).get('list_of_frequencies') or {}
+    if not listed or not all(listed.values()):
+        return None
+    return sorted({pol for pols in listed.values() for pol in pols})
+
+
 def get_polarizations(slc: SLC) -> dict[str, list[str]]:
     """Return the polarizations per frequency group for an RSLC.
 
@@ -478,8 +495,14 @@ def _crop_frequency_group(
             vals = np.clip(item[a0:a1].astype(np.int64) - p0, 0, p1 - p0)
             d = dst_fr.create_dataset(name, data=vals.astype(item.dtype))
             _copy_attrs(item, d)
+        elif name == 'listOfPolarizations':
+            # List only the polarizations kept in the crop.
+            d = dst_fr.create_dataset(name, data=np.array(pols, dtype=item.dtype))
+            _copy_attrs(item, d)
+        elif isinstance(item, h5py.Dataset) and item.ndim == 2 and item.dtype.kind == 'c':
+            continue  # a polarization image the crop was not asked to keep
         else:
-            src_fr.copy(name, dst_fr, name=name)  # slantRangeSpacing, listOfPolarizations, ...
+            src_fr.copy(name, dst_fr, name=name)  # slantRangeSpacing, ...
 
 
 def _crop_swaths_group(
@@ -659,13 +682,15 @@ def crop_streamed(
     az_looks: int,
     rg_looks: int,
     rg_looks_b: int | None = None,
+    polarizations: list[str] | None = None,
 ) -> str:
     """Solve the radar window from the skeleton, then stream-crop the window to ``<scene>.h5``.
 
     Reopens the remote product (cheap; avoids holding a handle across the intervening
     ancillary downloads) and reads only the windowed image chunks. ``bbox_wgs84`` is
     [lon_min, lat_min, lon_max, lat_max]; ``margin``/``az_looks``/``rg_looks``/``rg_looks_b``
-    pass through to :func:`aoi_to_radar_window`.
+    pass through to :func:`aoi_to_radar_window`. ``polarizations`` limits the crop to those
+    polarization images (all of them when None).
     """
     # Window + polarizations come from the local skeleton via the existing readers.
     slc = SLC(hdf5file=str(skeleton_path))
@@ -679,6 +704,10 @@ def crop_streamed(
     # Named as the granule itself: isce3 records the input file's name as the GUNW's
     # l1*SlcGranules metadata, which should list the true RSLC granule.
     out_path = f'{scene_name}.h5'
+    keep = get_polarizations(slc)
+    if polarizations:
+        # Stream only the polarization images the runconfig will process.
+        keep = {freq: [pol for pol in pols if pol in polarizations] for freq, pols in keep.items()}
     with open_remote_rslc(scene_name) as remote:
-        crop_rslc_from_handle(remote, out_path, window, get_polarizations(slc))
+        crop_rslc_from_handle(remote, out_path, window, keep)
     return out_path

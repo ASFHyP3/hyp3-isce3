@@ -5,6 +5,7 @@ import contextlib
 import logging
 import shutil
 import zipfile
+from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,7 +21,13 @@ from nisar.workflows.insar_runconfig import InsarRunConfig
 
 import hyp3_isce3
 from hyp3_isce3.cli import nullable_subset_list, parse_subset
-from hyp3_isce3.crop_rslc import crop_streamed, geocode_subset_box, get_multilook_looks, stream_skeleton
+from hyp3_isce3.crop_rslc import (
+    crop_streamed,
+    geocode_subset_box,
+    get_multilook_looks,
+    get_processed_polarizations,
+    stream_skeleton,
+)
 from hyp3_isce3.crop_tropo import crop_tropo
 from hyp3_isce3.dem import mosaic_tiles
 from hyp3_isce3.search import find_rslc, search_nisar
@@ -408,6 +415,14 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     return run_dir / zip_name
 
 
+def _init_staging_worker() -> None:
+    """Set up a staging worker process: the parent's log format and its own Earthdata session."""
+    logging.basicConfig(
+        format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', level=logging.INFO
+    )
+    earthaccess.login()
+
+
 def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | None) -> str:
     """Stage the inputs, run isce3, and zip the GUNW, all in the current directory.
 
@@ -420,48 +435,57 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
         zip_name: File name of the zip holding the GUNW h5 file and its runconfig.
     """
     earthaccess.login()
-    if subset:
-        # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
-        # product in every pre-crop step, and the image window is streamed by crop_streamed.
-        reference_path = str(stream_skeleton(reference_scene))
-        secondary_path = str(stream_skeleton(secondary_scene))
-    else:
-        reference_path = download_rslc(reference_scene)
-        secondary_path = download_rslc(secondary_scene)
+    scenes = (reference_scene, secondary_scene)
+    # The reference and secondary streams run side by side in worker processes. Threads would not
+    # help: h5py holds one lock per process, so two scenes would still be read one at a time.
+    with ProcessPoolExecutor(max_workers=8, initializer=_init_staging_worker) as pool:
+        # These depend only on the scene names, so they download while the rest is staged.
+        tropo_jobs = [pool.submit(get_tropo, scene, subset) for scene in scenes]
+        orbit_jobs = [pool.submit(get_orbit, scene) for scene in scenes]
+        tec_job = pool.submit(get_tec, reference_scene)
+        # The JPL runconfig is both our config template (its tail) and the source of the
+        # multilook looks the crop aligns to; download once and reuse for both.
+        template_job = pool.submit(download_yaml, decode_rslc_name(reference_scene)['search_keyword'])
 
-    # When subsetting, stage the water mask, weather models, and DEM over the AOI only
-    # (orbit/tec are temporal, so they are unaffected by the subset).
-    watermask = mosaic_tiles('NISAR_WATERMASK', reference_path, subset, 'watermask.tif')
+        if subset:
+            # Stream a metadata-only skeleton instead of the full RSLC; it stands in for the
+            # product in every pre-crop step, and the image window is streamed by crop_streamed.
+            reference_path, secondary_path = (str(path) for path in pool.map(stream_skeleton, scenes))
+        else:
+            reference_path = download_rslc(reference_scene)
+            secondary_path = download_rslc(secondary_scene)
 
-    reference_orbit = get_orbit(reference_scene)
-    secondary_orbit = get_orbit(secondary_scene)
+        # When subsetting, stage the water mask, weather models, and DEM over the AOI only
+        # (orbit/tec are temporal, so they are unaffected by the subset).
+        watermask_job = pool.submit(mosaic_tiles, 'NISAR_WATERMASK', reference_path, subset, 'watermask.tif')
 
-    reference_tropo = get_tropo(reference_scene, subset)
-    secondary_tropo = get_tropo(secondary_scene, subset)
+        epsg_code = get_epsg_code(reference_path)
+        dem_path = mosaic_tiles('NISAR_DEM', reference_path, subset, 'dem.tif')
+        template_yaml = template_job.result()
 
-    tec_path = get_tec(reference_scene)
+        # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
+        # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
+        subset_utm = None
+        if subset:
+            # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
+            # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
+            # decorrelated areas).
+            subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
+            az_step, rg_step, rg_looks_b = get_multilook_looks(template_yaml)
+            looks = {'az_looks': az_step, 'rg_looks': rg_step, 'rg_looks_b': rg_looks_b}
+            # Stream each RSLC's AOI window into a cropped <scene>.h5, windowed independently from
+            # its own orbit; only the overlapping chunks of the processed polarizations are pulled.
+            polarizations = get_processed_polarizations(template_yaml)
+            crop_jobs = [
+                pool.submit(crop_streamed, scene, skeleton, subset, dem_path, polarizations=polarizations, **looks)
+                for scene, skeleton in zip(scenes, (reference_path, secondary_path))
+            ]
+            reference_path, secondary_path = (job.result() for job in crop_jobs)
 
-    epsg_code = get_epsg_code(reference_path)
-    dem_path = mosaic_tiles('NISAR_DEM', reference_path, subset, 'dem.tif')
-
-    # The JPL runconfig is both our config template (its tail) and the source of the
-    # multilook looks the crop aligns to; download once and reuse for both.
-    template_yaml = download_yaml(decode_rslc_name(reference_path)['search_keyword'])
-
-    # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
-    # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
-    subset_utm = None
-    if subset:
-        # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
-        # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
-        # decorrelated areas).
-        subset_utm = geocode_subset_box(subset, epsg_code, template_yaml)
-        az_step, rg_step, rg_looks_b = get_multilook_looks(template_yaml)
-        looks = {'az_looks': az_step, 'rg_looks': rg_step, 'rg_looks_b': rg_looks_b}
-        # Stream each RSLC's AOI window into a cropped <scene>.h5, windowed
-        # independently from its own orbit; only overlapping image chunks are pulled.
-        reference_path = crop_streamed(reference_scene, reference_path, subset, dem_path, **looks)
-        secondary_path = crop_streamed(secondary_scene, secondary_path, subset, dem_path, **looks)
+        reference_tropo, secondary_tropo = (job.result() for job in tropo_jobs)
+        reference_orbit, secondary_orbit = (job.result() for job in orbit_jobs)
+        tec_path = tec_job.result()
+        watermask = watermask_job.result()
 
     yaml_path = get_config(
         reference_path,
