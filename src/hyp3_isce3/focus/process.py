@@ -3,7 +3,6 @@
 import argparse
 import contextlib
 import logging
-import zipfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
