@@ -179,7 +179,7 @@ def process_gcov(
     polarizations: list[str] | None = None,
     subset: list[float] | None = None,
     s3_uri: str | None = None,
-) -> Path:
+) -> str:
     """Create a GCOV product from an RSLC using ISCE3.
 
     Args:
