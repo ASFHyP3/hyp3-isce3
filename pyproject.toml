@@ -108,11 +108,9 @@ disable_error_code = ["import-untyped"]
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
 
-[tool.pixi.pypi-options]
-no-build-isolation = ['isce3']
-
 [tool.pixi.dependencies]
 pip = "*"
+isce3 = "0.25.22.*"
 asf_search = "*"
 boto3 = "*"
 botocore = "*"
@@ -177,7 +175,7 @@ pyre = "*"
 whirlwind-insar = ">=0.10.0"
 raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3"}
 
-# GPU image (Dockerfile.gpu): conda-forge's CUDA build of isce3 replaces the CPU source build.
+# GPU image (Dockerfile.gpu): conda-forge's CUDA build of isce3, pinned separately from the CPU build above.
 [tool.pixi.feature.gpu]
 platforms = ["linux-64"]
 
@@ -233,16 +231,6 @@ gpu = { features = ["gpu"], no-default-feature = true }
 cmd = "pip install snaphu --no-cache-dir"
 env = { SKBUILD_STRICT_CONFIG = "0", CMAKE_ARGS = "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types" }
 
-[tool.pixi.tasks.install-isce3]
-cmd = [
-    "python",
-    "-m",
-    "pip",
-    "install",
-    "git+https://github.com/isce-framework/isce3.git@4d2e5f43e6e873972e59a21123f917d1d5dc794a"
-]
-depends-on = ["install-snaphu"]
-
 [tool.pixi.tasks.install-editable]
 cmd = [
     "python",
@@ -252,7 +240,7 @@ cmd = [
     "-e",
     ".",
 ]
-depends-on = ["install-isce3"]
+depends-on = ["install-snaphu"]
 
 [tool.pixi.tasks.tests]
 cmd = [

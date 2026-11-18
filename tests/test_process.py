@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from hyp3_isce3 import process
@@ -238,3 +239,62 @@ def test_download_yaml_fallback(monkeypatch, tmp_path):
     groups = yaml.safe_load(template.read_text())['runconfig']['groups']
     assert groups['processing']['geocode']['output_epsg'] is None
     assert groups['processing']['crossmul'] == {'range_looks': 5, 'azimuth_looks': 6}
+
+
+def test_get_product_id_ignores_polarization_field():
+    # A dual-pol production RSLC and an HH-only refocus of the same track, frame and mode pass the name check.
+    single_pol = SECONDARY.replace('DHDH', 'SHSH')
+    assert process.get_product_id(REFERENCE, single_pol).startswith('NISAR_L2_OD_GUNW_005_019_A_011_4005_DHDH_A_')
+
+
+def test_get_product_id_rejects_other_frame():
+    with pytest.raises(ValueError, match='incompatible'):
+        process.get_product_id(REFERENCE, SECONDARY.replace('_019_A_011_', '_019_A_012_'))
+
+
+def _write_polarization_template(path: Path, list_of_frequencies: dict | None) -> Path:
+    groups = {'processing': {'input_subset': {'list_of_frequencies': list_of_frequencies}}}
+    path.write_text(yaml.safe_dump({'runconfig': {'groups': groups}}))
+    return path
+
+
+def test_check_polarizations(tmp_path):
+    dual = {'frequencyA': ['HH', 'HV'], 'frequencyB': ['HH', 'HV']}
+    single = {'frequencyA': ['HH'], 'frequencyB': ['HH']}
+    vertical = {'frequencyA': ['VV'], 'frequencyB': ['VV']}
+
+    # HH is listed and both RSLCs hold it, so a dual-pol / single-pol pair is fine.
+    hh_only = _write_polarization_template(tmp_path / 'hh.yaml', {'A': ['HH']})
+    process.check_polarizations(dual, single, hh_only)
+    # A listed polarization missing from either RSLC is an error.
+    with pytest.raises(ValueError, match='frequencyA HH'):
+        process.check_polarizations(dual, vertical, hh_only)
+    with pytest.raises(ValueError, match='frequencyA HV'):
+        process.check_polarizations(
+            dual, single, _write_polarization_template(tmp_path / 'hv.yaml', {'A': ['HH', 'HV']})
+        )
+
+    # Nothing listed means every polarization is processed, so the RSLCs must match.
+    for name, listed in (('none.yaml', None), ('empty.yaml', {'A': None})):
+        everything = _write_polarization_template(tmp_path / name, listed)
+        process.check_polarizations(dual, dual, everything)
+        with pytest.raises(ValueError, match='every frequencyA polarization'):
+            process.check_polarizations(dual, single, everything)
+
+
+def test_get_config_wraps_mask_type_for_list_schema(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    template = yaml.safe_load(_write_template(tmp_path / 'template.yaml').read_text())
+    mask = {'mask': {'mask_type': 'subswath_mask'}}
+    template['runconfig']['groups']['processing']['phase_unwrap'] = {'preprocess_wrapped_phase': mask}
+    (tmp_path / 'template.yaml').write_text(yaml.safe_dump(template))
+    # a stand-in isce3 install whose schema asks for a list
+    schemas = tmp_path / 'workflows' / 'schemas'
+    schemas.mkdir(parents=True)
+    (schemas / 'insar.yaml').write_text("mask:\n    mask_type: list(enum('coherence'), required=False)\n")
+    monkeypatch.setattr(process.insar, '__file__', str(tmp_path / 'workflows' / 'insar.py'))
+
+    yaml_file = get_config(REFERENCE, SECONDARY, 'a', 'b', 'c', 'd', 'dem', 'tec', 'wm', tmp_path / 'template.yaml')
+
+    written = yaml.safe_load(yaml_file.read_text())['runconfig']['groups']['processing']['phase_unwrap']
+    assert written['preprocess_wrapped_phase']['mask']['mask_type'] == ['subswath_mask']

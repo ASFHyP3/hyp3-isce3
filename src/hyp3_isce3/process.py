@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import logging
+import re
 import shutil
 import zipfile
 from concurrent.futures import ProcessPoolExecutor
@@ -16,6 +17,7 @@ import utm
 import xarray as xr
 import yaml
 from hyp3lib.aws import upload_file_to_s3
+from nisar.products.readers import SLC
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 
@@ -25,6 +27,7 @@ from hyp3_isce3.crop_rslc import (
     crop_streamed,
     geocode_subset_box,
     get_multilook_looks,
+    get_polarizations,
     get_processed_polarizations,
     stream_skeleton,
 )
@@ -124,6 +127,13 @@ def get_config(
     """
     runconfig = yaml.safe_load(Path(template_yaml).read_text())
     groups = runconfig['runconfig']['groups']
+
+    # Production runconfigs (isce3 0.25.16) write the unwrap mask_type as one value; newer isce3
+    # schemas take a list. Wrap it only when the installed schema asks for a list.
+    mask = groups.get('processing', {}).get('phase_unwrap', {}).get('preprocess_wrapped_phase', {}).get('mask', {})
+    schema = (Path(insar.__file__).parent / 'schemas' / 'insar.yaml').read_text()
+    if isinstance(mask.get('mask_type'), str) and re.search(r'^\s+mask_type: list\(', schema, re.MULTILINE):
+        mask['mask_type'] = [mask['mask_type']]
 
     # Rebuild the input and ancillary groups from our files so none of production's job-local
     # paths can leak through; only the ancillary descriptions are carried over.
@@ -374,7 +384,11 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     product_type = 'GUNW'
     reference = decode_rslc_name(reference_scene)
     secondary = decode_rslc_name(secondary_scene)
-    if reference['common'] != secondary['common']:
+    # Compatible by name = same track, direction, frame and mode. The polarization field (index 4)
+    # is left out: check_polarizations compares the RSLCs' polarizations with the runconfig's.
+    reference_fields, secondary_fields = reference['common'].split('_'), secondary['common'].split('_')
+    del reference_fields[4], secondary_fields[4]
+    if reference_fields != secondary_fields:
         raise ValueError(f'The scenes {reference_scene} and {secondary_scene} are incompatible')
     # Relabel the producer code (field 4 of the center block) from JPL 'J' to ASF 'A',
     # targeting just that field so a 'J' elsewhere in the block is never touched.
@@ -388,6 +402,41 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     )
 
     return product_id
+
+
+def check_polarizations(reference: dict[str, list[str]], secondary: dict[str, list[str]], template_yaml: Path) -> None:
+    """Check that both RSLCs hold the polarizations the runconfig processes.
+
+    Where the runconfig lists polarizations for a frequency, each must be in both RSLCs. Where it
+    lists none, isce3 processes every polarization, so both RSLCs must hold the same ones.
+
+    Args:
+        reference: Reference RSLC polarizations per frequency group, from get_polarizations.
+        secondary: Secondary RSLC polarizations per frequency group, from get_polarizations.
+        template_yaml: Path of the GUNW runconfig.
+
+    Raises:
+        ValueError: When a processed polarization is missing from either RSLC.
+    """
+    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
+    listed = (processing.get('input_subset') or {}).get('list_of_frequencies') or {}
+    # With no frequencies listed, isce3 processes every frequency of the reference.
+    for letter in listed or [frequency[-1] for frequency in reference]:
+        reference_pols = reference.get(f'frequency{letter}', [])
+        secondary_pols = secondary.get(f'frequency{letter}', [])
+        wanted = listed.get(letter)
+        if wanted:
+            for pol in wanted:
+                if pol not in reference_pols or pol not in secondary_pols:
+                    raise ValueError(
+                        f'The runconfig processes frequency{letter} {pol}, but the reference holds '
+                        f'{reference_pols} and the secondary holds {secondary_pols}'
+                    )
+        elif sorted(reference_pols) != sorted(secondary_pols):
+            raise ValueError(
+                f'The runconfig processes every frequency{letter} polarization, but the reference holds '
+                f'{reference_pols} and the secondary holds {secondary_pols}'
+            )
 
 
 def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float] | None = None) -> Path:
@@ -462,6 +511,12 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
         epsg_code = get_epsg_code(reference_path)
         dem_path = mosaic_tiles('NISAR_DEM', reference_path, subset, 'dem.tif')
         template_yaml = template_job.result()
+        # Stop here, before the crops, if either RSLC lacks a polarization the runconfig processes.
+        check_polarizations(
+            get_polarizations(SLC(hdf5file=reference_path)),
+            get_polarizations(SLC(hdf5file=secondary_path)),
+            template_yaml,
+        )
 
         # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
         # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
