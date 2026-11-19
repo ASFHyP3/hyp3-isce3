@@ -197,8 +197,9 @@ jobs:
           src: ghcr.io/${{ needs.version-info.outputs.repo }}:${{ steps.tag.outputs.version_tag }}
           dst: ghcr.io/${{ needs.version-info.outputs.repo }}:latest
 
+      # FIXME:
       - name: Add GPU tag
-        if: ${{ github.event_name != 'pull_request' && matrix.variant == 'gpu' }}
+        if: ${{ matrix.variant == 'gpu' }}
         uses: akhilerm/tag-push-action@v2.3.0
         with:
           src: ghcr.io/${{ needs.version-info.outputs.repo }}:${{ steps.tag.outputs.version_tag }}
