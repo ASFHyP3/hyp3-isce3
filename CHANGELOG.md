@@ -10,6 +10,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - `--fast` runs the isce3 InSAR workflow through the new `hyp3_isce3.isce3_fast` module: the same steps and runconfig, with CPU dense offsets split into parallel azimuth strips, the unwrap-looks crossmul run next to the first crossmul, the rubbersheet azimuth and range offsets for fine resample made side by side in one pass each, the product writers run next to coarse resample and dense offsets, the wrapped-interferogram geocoding, troposphere and solid earth tides run during unwrap, and three slow numpy routines (the rubbersheet polynomial fit and two ionosphere filters) replaced with equivalents, and the reference SLC copied out of its HDF5 once instead of once per step. The GUNW is not bit-identical to a standard run (on a full frame, a smooth surface of about 2 mm in the pixel offsets and 1.5 mrad of phase), so the SDS workflow stays the default.
+- `--fast` unwraps with whirlwind instead of the runconfig's snaphu, for the main unwrap and the ionosphere's own. The unwrapped phase can sit a whole number of cycles from a snaphu run's, connected components differ in low-coherence areas, and the ionosphere phase screen can differ by a constant (64.6 rad on the README subset pair).
 - Before cropping or processing, both RSLCs are checked for the polarizations the runconfig processes. A pair may now differ in polarization mode (e.g. a dual-pol production RSLC with an HH-only refocus) as long as both hold every processed polarization.
 - A weekly `Update isce3` GitHub workflow opens a pull request when conda-forge has a newer isce3 release built for every supported platform and Python version.
 
@@ -19,7 +20,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - Production runconfigs written by isce3 0.25.16 give the unwrap `mask_type` as a single value; it is wrapped in a list when the installed isce3 schema requires one.
-- The troposphere step no longer fails with `module 'numpy' has no attribute 'trapz'` on numpy 2.4 or newer. RAiDER 0.5.3 still calls `np.trapz`, so the package restores it as `np.trapezoid` on import.
 
 ## [0.5.0]
 
