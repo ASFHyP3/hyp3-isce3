@@ -306,8 +306,6 @@ def _run_focus(
     output = output.rename(f'{granule_id}.h5')
     yaml_path = yaml_path.rename(f'{granule_id}.rc.yaml')
 
-    # TODO: Add arg to switch zipping on and off
-
     return f'{granule_id}.h5'
 
 
