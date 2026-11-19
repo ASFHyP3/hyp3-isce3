@@ -17,7 +17,7 @@ def main() -> None:
     parser = ArgumentParser(prefix_chars='+', add_help=False)
     parser.add_argument(
         '++process',
-        choices=['gunw', 'focus_l0b'],
+        choices=['gunw', 'focus_l0b', 'gcov'],
         default='gunw',
         help='Select the workflow to run: GUNW from two RSLCs (default) or RSLC focused from an L0B',
     )

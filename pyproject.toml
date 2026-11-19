@@ -40,6 +40,7 @@ develop = [
 [project.entry-points.hyp3]
 gunw = "hyp3_isce3.process:main"
 focus_l0b = "hyp3_isce3.focus.process:main"
+gcov = "hyp3_isce3.gcov.process:main"
 
 [project.urls]
 Homepage = "https://github.com/ASFHyP3/hyp3-isce3"

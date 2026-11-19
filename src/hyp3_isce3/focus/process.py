@@ -3,7 +3,6 @@
 import argparse
 import contextlib
 import logging
-import zipfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -307,10 +306,7 @@ def _run_focus(
     output = output.rename(f'{granule_id}.h5')
     yaml_path = yaml_path.rename(f'{granule_id}.rc.yaml')
 
-    with zipfile.ZipFile(f'{granule_id}.zip', 'w', zipfile.ZIP_DEFLATED) as zip_ref:
-        zip_ref.write(str(output))
-        zip_ref.write(str(yaml_path))
-    return f'{granule_id}.zip'
+    return f'{granule_id}.h5'
 
 
 def main() -> None:
