@@ -22,6 +22,7 @@ from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
 
 import hyp3_isce3
+from hyp3_isce3 import isce3_fast
 from hyp3_isce3.cli import nullable_subset_list, parse_subset
 from hyp3_isce3.crop_rslc import (
     crop_streamed,
@@ -439,7 +440,9 @@ def check_polarizations(reference: dict[str, list[str]], secondary: dict[str, li
             )
 
 
-def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float] | None = None) -> Path:
+def process_isce3(
+    reference_scene: str, secondary_scene: str, subset: list[float] | None = None, fast: bool = False
+) -> Path:
     """Run the isce3 InSAR workflow to produce a GUNW for a pair of RSLCs.
 
     Everything is staged and processed in a folder named for the product, so several runs
@@ -449,6 +452,8 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
         reference_scene: Name of one input scene (ordered internally against the other).
         secondary_scene: Name of the other input scene.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
+        fast: Run isce3 through :func:`hyp3_isce3.isce3_fast.fast_run`, which is quicker but whose
+            products are not bit-identical to the standard run's.
 
     Returns:
         zip_path: Absolute path of the zip holding the GUNW h5 file and its runconfig.
@@ -460,7 +465,7 @@ def process_isce3(reference_scene: str, secondary_scene: str, subset: list[float
     run_dir = Path(product_id).resolve()
     run_dir.mkdir(exist_ok=True)
     with contextlib.chdir(run_dir):
-        zip_name = _run_pair(reference_scene, secondary_scene, subset)
+        zip_name = _run_pair(reference_scene, secondary_scene, subset, fast)
     return run_dir / zip_name
 
 
@@ -472,13 +477,14 @@ def _init_staging_worker() -> None:
     earthaccess.login()
 
 
-def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | None) -> str:
+def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | None, fast: bool = False) -> str:
     """Stage the inputs, run isce3, and zip the GUNW, all in the current directory.
 
     Args:
         reference_scene: Name of the reference (earlier) scene.
         secondary_scene: Name of the secondary (later) scene.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GUNW.
+        fast: Run isce3 with the speedups in :mod:`hyp3_isce3.isce3_fast` instead of the standard workflow.
 
     Returns:
         zip_name: File name of the zip holding the GUNW h5 file and its runconfig.
@@ -583,7 +589,11 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
 
     _, out_paths = h5_prep.get_products_and_paths(insar_runcfg.cfg)
 
-    insar.run(cfg=insar_runcfg.cfg, out_paths=out_paths, run_steps=run_steps)
+    if fast:
+        # Same steps and runconfig with idle cores put to work; not always bit-identical to the standard run.
+        isce3_fast.fast_run(insar_runcfg.cfg, out_paths, yaml_path)
+    else:
+        insar.run(cfg=insar_runcfg.cfg, out_paths=out_paths, run_steps=run_steps)
 
     output = Path('output/GUNW_product.h5')
     if not output.exists():
@@ -621,6 +631,11 @@ def main() -> None:
         nargs='*',
         help='Optional WGS84 bounding box to subset the output GUNW (LON_MIN LAT_MIN LON_MAX LAT_MAX)',
     )
+    parser.add_argument(
+        '--fast',
+        action='store_true',
+        help='Run isce3 with parallel and overlapped steps. Quicker, but the GUNW is not bit-identical to a SDS run',
+    )
 
     args = parser.parse_args()
 
@@ -634,7 +649,7 @@ def main() -> None:
 
     # process_isce3 orders the pair itself (earlier acquisition becomes the reference).
     granule_1, granule_2 = args.granules
-    product_file = process_isce3(granule_1, granule_2, subset=args.subset)
+    product_file = process_isce3(granule_1, granule_2, subset=args.subset, fast=args.fast)
 
     if args.bucket:
         upload_file_to_s3(product_file, args.bucket, args.bucket_prefix)
