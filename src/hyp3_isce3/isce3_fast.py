@@ -14,12 +14,13 @@ Everything that departs from stock isce3 lives in this file, in three groups:
                     is hard-linked for the next step that asks for it instead of being copied again.
   parallel steps    CPU dense offsets run as one process per azimuth strip of the offset grid. The crossmul that
                     unwrap reruns at its own looks starts in a child process next to the first crossmul.
+                    Both crossmuls run as one process per azimuth strip (the files come out byte-identical).
                     Rubbersheet's azimuth and range offsets for fine resample are made side by side, each in one
                     pass over the full RSLC grid instead of two (the files come out byte-identical to isce3's).
   overlapped steps  The product writers run next to coarse resample and dense offsets. The wrapped-interferogram
                     geocoding, troposphere and solid earth tides run while the single-threaded unwrap is going.
-                    start_side_band would also run the ionosphere's frequency B interferogram during unwrap; it is
-                    here but fast_run does not call it, as it has not been run on a real pair.
+                    The ionosphere's frequency B interferogram starts once rubbersheet is done and runs next to
+                    fine resample, crossmul and unwrap.
 
 The unwrapper is also switched from the runconfig's snaphu to whirlwind, isce3's other minimum-cost-flow
 unwrapper, so the unwrapped phase and connected components come from a different algorithm than a standard run's.
@@ -43,8 +44,10 @@ import isce3
 import numpy as np
 import yaml
 from isce3.atmosphere import ionosphere_filter
+from isce3.io import HDF5OptimizedReader
 from isce3.io.gdal.gdal_raster import GDALRaster
 from isce3.math import offsets_polyfit
+from nisar.products.insar.product_paths import RIFGGroupsPaths
 from nisar.products.readers import SLC
 from nisar.workflows import (
     crossmul,
@@ -56,6 +59,7 @@ from nisar.workflows import (
     prepare_insar_hdf5,
     rubbersheet,
 )
+from nisar.workflows.compute_stats import compute_stats_real_data
 from nisar.workflows.geocode_insar import InputProduct
 from nisar.workflows.helpers import get_cfg_freq_pols
 from nisar.workflows.insar_runconfig import InsarRunConfig
@@ -72,6 +76,8 @@ SPAWN = multiprocessing.get_context('spawn')
 OFFSET_RASTERS = {'dense_offsets': 2, 'gross_offset': 2, 'snr': 1, 'covariance': 3, 'correlation_peak': 1}
 # flat copies of SLCs made so far in this run: (RSLC path, frequency, polarization, format) -> copy
 _SLC_COPIES: dict[tuple, str] = {}
+# isce3's own crossmul.run, kept for GPU runs before fast_run replaces it in the module
+_ISCE3_CROSSMUL = crossmul.run
 
 
 # === faster functions ================================================================================================
@@ -333,6 +339,158 @@ def dense_offsets_in_strips(cfg: dict) -> None:
     log.info(f'successfully ran dense_offsets in strips in {time.time() - t0:.3f} seconds')
 
 
+# --- crossmul in azimuth strips ------------------------------------------------------------------------------------
+def _child_crossmul_strip(
+    ref_hdf5: str, sec_hdf5: str, freq: str, settings: dict, rasters: dict, start: int, n_lines: int, out: str
+) -> None:
+    """Crossmultiply lines start to start + n_lines of the SLCs, set up the way crossmul.run sets up the whole grid."""
+    # GDAL's block cache defaults to 5% of RAM in every process, and each strip fills its own as it reads; on a
+    # full frame 16 strips grew to about 190 GB that way (T120 F023, 2026-11-20). The size changes neither the
+    # output nor the run time (64 MB to 512 MB on the README subset pair).
+    gdal.SetCacheMax(64 * 1024 * 1024)
+    ref_slc, sec_slc = SLC(hdf5file=ref_hdf5), SLC(hdf5file=sec_hdf5)
+    grid = ref_slc.getRadarGrid(freq)
+    strip = isce3.signal.Crossmul()
+    strip.range_looks, strip.az_looks = settings['rg_looks'], settings['az_looks']
+    strip.oversample_factor, strip.lines_per_block = settings['oversample'], settings['lines_per_block']
+    strip.set_dopplers(
+        isce3.core.avg_lut2d_to_lut1d(ref_slc.getDopplerCentroid(frequency=freq)),
+        isce3.core.avg_lut2d_to_lut1d(sec_slc.getDopplerCentroid(frequency=freq)),
+    )
+    strip.range_pixel_spacing, strip.wavelength = grid.range_pixel_spacing, grid.wavelength
+    if 'flatten' in rasters:
+        strip.ref_sec_offset_starting_range_shift = sec_slc.getRadarGrid(freq).starting_range - grid.starting_range
+    # the strip's lines of each input, as a window onto the whole raster
+    windows = {}
+    for name, path in rasters.items():
+        gdal.Translate(f'{out}_{name}.vrt', path, format='VRT', srcWin=[0, start, grid.width, n_lines])
+        windows[name] = isce3.io.Raster(f'{out}_{name}.vrt')
+    shape = (grid.width // settings['rg_looks'], n_lines // settings['az_looks'], 1)
+    igram = isce3.io.Raster(f'{out}_igram', *shape, gdal.GDT_CFloat32, 'ENVI')
+    coherence = isce3.io.Raster(f'{out}_coherence', *shape, gdal.GDT_Float32, 'ENVI')
+    strip.crossmul(windows['reference'], windows['secondary'], igram, coherence, windows.get('flatten'))
+
+
+def crossmul_in_strips(
+    cfg: dict,
+    output_hdf5: str | None = None,
+    resample_type: str = 'coarse',
+    dump_on_disk: bool = False,
+    rg_looks: int | None = None,
+    az_looks: int | None = None,
+) -> None:
+    """Drop-in for crossmul.run on CPU: the same interferogram and coherence, made in parallel azimuth strips.
+
+    isce3's Crossmul works line by line apart from the multilooking, so strips that start on a multiple of
+    the azimuth looks give the bytes the whole raster would (checked on the README subset pair at 5x6 and
+    13x16 looks, 2026-11-19). The layout around the strips follows crossmul.run.
+    """
+    if cfg['worker']['gpu_enabled']:
+        return _ISCE3_CROSSMUL(cfg, output_hdf5, resample_type, dump_on_disk, rg_looks, az_looks)
+    ref_hdf5 = cfg['input_file_group']['reference_rslc_file']
+    sec_hdf5 = cfg['input_file_group']['secondary_rslc_file']
+    params = cfg['processing']['crossmul']
+    scratch_path = Path(cfg['product_path_group']['scratch_path'])
+    rg_looks = rg_looks or params['range_looks']
+    az_looks = az_looks or params['azimuth_looks']
+    settings = {
+        'rg_looks': rg_looks,
+        'az_looks': az_looks,
+        'oversample': params['oversample'],
+        'lines_per_block': params['lines_per_block'],
+    }
+    if output_hdf5 is None:
+        output_hdf5 = str(scratch_path / 'crossmul/product.h5')
+    coregistered_slc_path = Path(params['coregistered_slc_path'])
+    ref_slc = SLC(hdf5file=ref_hdf5)
+    t0 = time.time()
+    # each strip runs isce3's own few threads, so a strip for every four cores fills the node
+    n_strips = max(1, (os.cpu_count() or 4) // 4)
+    with HDF5OptimizedReader(name=output_hdf5, mode='a', libver='latest') as dst_h5:
+        for freq, pol_list, offset_pol_list in get_cfg_freq_pols(cfg):
+            grid = ref_slc.getRadarGrid(freq)
+            out_shape = (grid.length // az_looks, grid.width // rg_looks)
+            # strip edges in SLC lines, each on a multiple of the azimuth looks
+            cuts = np.linspace(0, out_shape[0], min(n_strips, out_shape[0]) + 1).astype(int) * az_looks
+            for pol in pol_list:
+                output_dir = scratch_path / f'crossmul/freq{freq}/{pol}'
+                output_dir.mkdir(parents=True, exist_ok=True)
+                rasters = {'reference': str(output_dir / 'reference.slc')}
+                crossmul.copy_raster(
+                    ref_hdf5, freq, pol, params['lines_per_block'], rasters['reference'], file_type='ENVI'
+                )
+                if coregistered_slc_path.is_file():
+                    rasters['secondary'] = str(output_dir / 'secondary.slc')
+                    crossmul.copy_raster(
+                        sec_hdf5, freq, pol, params['lines_per_block'], rasters['secondary'], file_type='ENVI'
+                    )
+                else:
+                    rasters['secondary'] = str(
+                        coregistered_slc_path
+                        / f'{resample_type}_resample_slc/freq{freq}/{pol}/coregistered_secondary.slc'
+                    )
+                if params['flatten']:
+                    rasters['flatten'] = f'{params["flatten_path"]}/geo2rdr/freq{freq}/range.off'
+                # the children resolve these themselves
+                rasters = {name: str(Path(path).resolve()) for name, path in rasters.items()}
+
+                strip_dir = output_dir / f'strips_rg{rg_looks}_az{az_looks}'
+                strip_dir.mkdir(exist_ok=True)
+                # Crossmul holds about 340 bytes per pixel of a block (measured on the README subset pair), so the
+                # block is divided among the strips, and halved again because the crossmul at the unwrap looks runs
+                # at the same time, to keep all their memory together near one whole-raster call's.
+                # The block size does not change the output.
+                strip_settings = dict(
+                    settings, lines_per_block=max(az_looks, params['lines_per_block'] // (2 * (len(cuts) - 1)))
+                )
+                children = []
+                for k in range(len(cuts) - 1):
+                    args = (ref_hdf5, sec_hdf5, freq, strip_settings, rasters, int(cuts[k]), int(cuts[k + 1] - cuts[k]))
+                    child = SPAWN.Process(target=_child_crossmul_strip, args=(*args, str(strip_dir / f'{k:03d}')))
+                    child.start()
+                    children.append(child)
+                for k, child in enumerate(children):
+                    _join(child, f'crossmul strip {k}')
+
+                # stitch: the strip rasters are flat single-band files, so they concatenate in row order
+                parts = {
+                    name: [strip_dir / f'{k:03d}_{name}' for k in range(len(children))]
+                    for name in ('igram', 'coherence')
+                }
+                if dump_on_disk:
+                    for name, stem, dtype in [
+                        ('igram', 'wrapped_igram', gdal.GDT_CFloat32),
+                        ('coherence', 'coherence', gdal.GDT_Float32),
+                    ]:
+                        whole_path = output_dir / f'{stem}_rg{rg_looks}_az{az_looks}'
+                        # isce3's raster writes the ENVI header; the strips then fill the data file
+                        isce3.io.Raster(str(whole_path), out_shape[1], out_shape[0], 1, dtype, 'ENVI').close_dataset()
+                        with whole_path.open('wb') as whole_file:
+                            for part in parts[name]:
+                                whole_file.write(part.read_bytes())
+                else:
+                    pol_group_path = f'{RIFGGroupsPaths().SwathsPath}/frequency{freq}/interferogram/{pol}'
+                    coh_dataset = dst_h5[f'{pol_group_path}/coherenceMagnitude']
+                    for name, dataset, dtype in [
+                        ('igram', dst_h5[f'{pol_group_path}/wrappedInterferogram'], np.complex64),
+                        ('coherence', coh_dataset, np.float32),
+                    ]:
+                        row = 0
+                        for part in parts[name]:
+                            block: np.ndarray = np.fromfile(part, dtype=dtype).reshape(-1, out_shape[1])
+                            dataset[row : row + len(block)] = block
+                            row += len(block)
+                    # statistics, as crossmul.run allocates them
+                    coh_raster = isce3.io.Raster(f'IH5:::ID={coh_dataset.id.id}'.encode(), update=True)
+                    compute_stats_real_data(coh_raster, coh_dataset)
+                    for offset_pol in offset_pol_list:
+                        crossmul.stats_offsets(dst_h5, freq, offset_pol)
+                    del coh_raster
+                shutil.rmtree(strip_dir)
+                log.info(f'crossmul freq{freq} {pol} at {rg_looks}x{az_looks} looks in {len(children)} strips')
+    log.info(f'successfully ran crossmul in strips in {time.time() - t0:.3f} seconds')
+
+
 # --- the unwrap-looks crossmul alongside the first crossmul ----------------------------------------------------------
 def _child_crossmul(
     yaml_path: str, resample_type: str, rg_looks: int, az_looks: int, scratch: str, inputs: dict, slc_copies: dict
@@ -348,7 +506,7 @@ def _child_crossmul(
     # SLC and flattening paths were already resolved to the real scratch when the runconfig loaded.
     cfg['product_path_group']['scratch_path'] = scratch
     Path(scratch, 'crossmul').mkdir(parents=True, exist_ok=True)
-    crossmul.run(
+    crossmul_in_strips(
         cfg, output_hdf5=None, resample_type=resample_type, dump_on_disk=True, rg_looks=rg_looks, az_looks=az_looks
     )
 
@@ -377,7 +535,7 @@ def _overlap_crossmul(yaml_path: str) -> None:
             child_args = (yaml_path, resample_type, *looks, child_scratch, inputs, dict(_SLC_COPIES))
             state['child'] = SPAWN.Process(target=_child_crossmul, args=child_args)
             state['child'].start()
-            return isce3_crossmul(cfg, output_hdf5, resample_type, dump_on_disk, rg_looks, az_looks)
+            return crossmul_in_strips(cfg, output_hdf5, resample_type, dump_on_disk, rg_looks, az_looks)
         # unwrap asks for the unwrap-looks crossmul: collect the child and put its rasters where unwrap reads them.
         if 'child' in state and not state.get('joined') and dump_on_disk and (rg_looks, az_looks) == state['looks']:
             state['joined'] = True
@@ -544,12 +702,11 @@ def _child_side_band(yaml_path: str, inputs: dict, runw_hdf5: str) -> None:
 
 
 def start_side_band(cfg: dict, yaml_path: str, runw_hdf5: str) -> multiprocessing.process.BaseProcess | None:
-    """Start the ionosphere's side-band interferogram in a side process, to overlap it with the unwrap.
+    """Start the ionosphere's side-band interferogram in a side process, to overlap it with later steps.
 
-    NOT called by fast_run: written from a reading of isce3 0.25.22's ionosphere.py and never run on a real
-    pair (2026-11-18). On a full frame the side-band chain is about 410 s (frequency B rdr2geo, geo2rdr,
-    product file, resample and crossmul) that needs the rubbersheet offsets and nothing from the main unwrap.
-    To use it, call it after fine resample and before the unwrap step; the ionosphere step then collects it.
+    The side-band chain (frequency B rdr2geo, geo2rdr, product file, resample and crossmul) needs the
+    rubbersheet offsets and nothing later, so it is started once rubbersheet is done and runs beside fine
+    resample, crossmul and the unwrap. The ionosphere step then collects it in place of making it.
 
     Only the side-band methods are handled; the split-spectrum methods interleave their sub-band runs with
     other work, and are left to isce3.
@@ -646,11 +803,11 @@ def fast_run(cfg: dict, out_paths: dict, yaml_path: Path) -> None:
         insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('coarse_resample', 'dense_offsets'))
         writers_job.result()
 
-    insar.run(
-        cfg=cfg,
-        out_paths=out_paths,
-        run_steps=_only_steps('offsets_product', 'rubbersheet', 'fine_resample', 'crossmul', 'filter_interferogram'),
-    )
+    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('offsets_product', 'rubbersheet'))
+    # The ionosphere's side-band interferogram needs the rubbersheet offsets and nothing later; the
+    # ionosphere step below collects it.
+    start_side_band(cfg, runconfig_path, out_paths['RUNW'])
+    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('fine_resample', 'crossmul', 'filter_interferogram'))
 
     with ProcessPoolExecutor(max_workers=1, mp_context=SPAWN) as pool:
         side_job = pool.submit(_run_under_unwrap, runconfig_path, inputs)

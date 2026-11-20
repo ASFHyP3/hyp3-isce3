@@ -15,7 +15,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A weekly `Update isce3` GitHub workflow opens a pull request when conda-forge has a newer isce3 release built for every supported platform and Python version.
 
 ### Changed
-- isce3 is installed from conda-forge (pinned to 0.25.22) instead of being built from source at a pinned commit (0.25.17 plus a version bump), which removes the compile from the Docker build and from `pixi install`. Products follow isce3 0.25.22: product specification 1.6.0, per-polarization `validDataMask` layers, and updated mask values.
+- isce3 is installed from conda-forge (pinned to 0.25.23) instead of being built from source at a pinned commit (0.25.17 plus a version bump), which removes the compile from the Docker build and from `pixi install`. Products follow isce3 0.25.23: product specification 1.6.0, per-polarization `validDataMask` layers, and updated mask values.
 - With `--subset`, the reference and secondary scenes are staged in parallel processes, the RSLC crops start as soon as the skeletons, DEM and runconfig exist, and the crops hold only the polarizations the runconfig processes.
 
 ### Fixed

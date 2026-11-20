@@ -110,7 +110,7 @@ platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
 
 [tool.pixi.dependencies]
 pip = "*"
-isce3 = "0.25.22.*"
+isce3 = "0.25.23.*"
 asf_search = "*"
 boto3 = "*"
 botocore = "*"
@@ -184,7 +184,7 @@ cuda = "12"
 
 # Only what the focus path imports; the gpu environment skips the default feature (InSAR stack, git pypi deps).
 [tool.pixi.feature.gpu.dependencies]
-isce3 = { version = "0.25.21", build = "*cuda*" }
+isce3 = { version = "0.25.23", build = "*cuda*" }
 python = "3.12.*"
 pip = "*"
 asf_search = "*"
