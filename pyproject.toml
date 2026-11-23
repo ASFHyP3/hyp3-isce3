@@ -251,6 +251,7 @@ cmd = [
     "-e",
     ".",
 ]
+depends-on = ["install-snaphu"]
 
 [tool.pixi.feature.pycharm.dependencies]
 pixi-pycharm = "*"
