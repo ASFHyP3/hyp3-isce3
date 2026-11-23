@@ -221,7 +221,7 @@ shapely = "*"
 scipy = ">=1.0"
 utm = "*"
 xarray = "*"
-whirlwind = "*"
+whirlwind-insar = "*"
 # For building radar deps
 cxx-compiler = "*"
 gfortran = "*"
