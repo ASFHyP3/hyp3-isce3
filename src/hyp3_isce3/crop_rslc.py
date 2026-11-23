@@ -360,21 +360,42 @@ def get_multilook_looks(template_yaml: Path) -> tuple[int, int, int]:
     return az_step, rg_step, int(unwrap['range_looks'])
 
 
-def get_processed_polarizations(template_yaml: Path) -> list[str] | None:
-    """Read the polarizations the runconfig processes, so the crop can leave the others out.
+def get_processed_polarizations(template_yaml: Path) -> tuple[dict[str, list[str]], list[str] | None]:
+    """Read the polarizations the runconfig's steps read, for the pre-crop check and the crop.
 
     Args:
         template_yaml: Path of a GUNW runconfig.
 
     Returns:
-        The polarizations listed under input_subset.list_of_frequencies, or None when any
-        frequency is listed without polarizations (isce3 then processes all of them).
+        processed: Frequency letter -> polarizations both RSLCs must hold: those under
+            input_subset.list_of_frequencies plus, when the ionosphere correction is enabled, the
+            ones it lists for itself. A frequency listed without polarizations maps to an empty
+            list (isce3 then processes all of them). Empty when input_subset lists no frequency
+            (isce3 then processes every one).
+        keep: Polarizations for the crop to keep, or None to keep them all (some frequency is
+            processed whole).
     """
     processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
     listed = (processing.get('input_subset') or {}).get('list_of_frequencies') or {}
-    if not listed or not all(listed.values()):
-        return None
-    return sorted({pol for pols in listed.values() for pol in pols})
+    processed = {letter: list(pols or []) for letter, pols in listed.items()}
+    if not processed:
+        return processed, None
+    whole = not all(processed.values())
+    keep = {pol for pols in processed.values() for pol in pols}
+    ionosphere = processing.get('ionosphere_phase_correction') or {}
+    if ionosphere.get('enabled', True):
+        ionosphere_listed = ionosphere.get('list_of_frequencies') or {}
+        # The ionosphere step can read polarizations the main run does not, e.g. a frequency B side band.
+        for letter, pols in ionosphere_listed.items():
+            if pols and processed.get(letter) != []:
+                processed[letter] = sorted({*processed.get(letter, []), *pols})
+                keep.update(pols)
+        # For a band it lists no polarizations for, isce3 uses the main run's frequency A co-pols. When
+        # there are none (a cross-pol run) it uses every co-pol both RSLCs hold, so the crop keeps those.
+        co_pols = {'HH', 'VV'}
+        if not (ionosphere_listed.get('A') and ionosphere_listed.get('B')) and not co_pols & set(listed.get('A') or []):
+            keep |= co_pols
+    return processed, None if whole else sorted(keep)
 
 
 def get_polarizations(slc: SLC) -> dict[str, list[str]]:

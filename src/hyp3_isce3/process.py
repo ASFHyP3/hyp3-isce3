@@ -3,10 +3,12 @@
 import argparse
 import contextlib
 import logging
+import multiprocessing
 import re
 import shutil
 import zipfile
-from concurrent.futures import ProcessPoolExecutor
+from collections.abc import Iterator
+from concurrent.futures import FIRST_EXCEPTION, Executor, ProcessPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -405,7 +407,9 @@ def get_product_id(reference_scene: str, secondary_scene: str) -> str:
     return product_id
 
 
-def check_polarizations(reference: dict[str, list[str]], secondary: dict[str, list[str]], template_yaml: Path) -> None:
+def check_polarizations(
+    reference: dict[str, list[str]], secondary: dict[str, list[str]], listed: dict[str, list[str]]
+) -> None:
     """Check that both RSLCs hold the polarizations the runconfig processes.
 
     Where the runconfig lists polarizations for a frequency, each must be in both RSLCs. Where it
@@ -414,13 +418,11 @@ def check_polarizations(reference: dict[str, list[str]], secondary: dict[str, li
     Args:
         reference: Reference RSLC polarizations per frequency group, from get_polarizations.
         secondary: Secondary RSLC polarizations per frequency group, from get_polarizations.
-        template_yaml: Path of the GUNW runconfig.
+        listed: The runconfig's polarizations per frequency letter, from get_processed_polarizations.
 
     Raises:
         ValueError: When a processed polarization is missing from either RSLC.
     """
-    processing = yaml.safe_load(Path(template_yaml).read_text())['runconfig']['groups']['processing']
-    listed = (processing.get('input_subset') or {}).get('list_of_frequencies') or {}
     # With no frequencies listed, isce3 processes every frequency of the reference.
     for letter in listed or [frequency[-1] for frequency in reference]:
         reference_pols = reference.get(f'frequency{letter}', [])
@@ -477,6 +479,18 @@ def _init_staging_worker() -> None:
     earthaccess.login()
 
 
+@contextlib.contextmanager
+def _stop_pool_on_error(pool: Executor) -> Iterator[None]:
+    """Stop a staging pool's workers when the block fails, so the error is not held back by their downloads."""
+    try:
+        yield
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        for worker in multiprocessing.active_children():
+            worker.terminate()
+        raise
+
+
 def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | None, fast: bool = False) -> str:
     """Stage the inputs, run isce3, and zip the GUNW, all in the current directory.
 
@@ -493,7 +507,7 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
     scenes = (reference_scene, secondary_scene)
     # The reference and secondary streams run side by side in worker processes. Threads would not
     # help: h5py holds one lock per process, so two scenes would still be read one at a time.
-    with ProcessPoolExecutor(max_workers=8, initializer=_init_staging_worker) as pool:
+    with ProcessPoolExecutor(max_workers=8, initializer=_init_staging_worker) as pool, _stop_pool_on_error(pool):
         # These depend only on the scene names, so they download while the rest is staged.
         tropo_jobs = [pool.submit(get_tropo, scene, subset) for scene in scenes]
         orbit_jobs = [pool.submit(get_orbit, scene) for scene in scenes]
@@ -518,15 +532,17 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
         dem_path = mosaic_tiles('NISAR_DEM', reference_path, subset, 'dem.tif')
         template_yaml = template_job.result()
         # Stop here, before the crops, if either RSLC lacks a polarization the runconfig processes.
+        listed, polarizations = get_processed_polarizations(template_yaml)
         check_polarizations(
             get_polarizations(SLC(hdf5file=reference_path)),
             get_polarizations(SLC(hdf5file=secondary_path)),
-            template_yaml,
+            listed,
         )
 
         # Crop the RSLCs to the AOI before processing so the radar-domain steps run on a
         # small patch; the crop floors its origin to the multilook looks (see crop_rslc).
         subset_utm = None
+        crop_jobs = []
         if subset:
             # Reproject the AOI to the output UTM box and snap it to the geocode grid so the subset's
             # pixels coincide with a full-frame run's (else a sub-pixel offset re-rolls speckle in
@@ -536,13 +552,17 @@ def _run_pair(reference_scene: str, secondary_scene: str, subset: list[float] | 
             looks = {'az_looks': az_step, 'rg_looks': rg_step, 'rg_looks_b': rg_looks_b}
             # Stream each RSLC's AOI window into a cropped <scene>.h5, windowed independently from
             # its own orbit; only the overlapping chunks of the processed polarizations are pulled.
-            polarizations = get_processed_polarizations(template_yaml)
             crop_jobs = [
                 pool.submit(crop_streamed, scene, skeleton, subset, dem_path, polarizations=polarizations, **looks)
                 for scene, skeleton in zip(scenes, (reference_path, secondary_path))
             ]
-            reference_path, secondary_path = (job.result() for job in crop_jobs)
 
+        # Wait for the staging jobs together and stop at the first one that fails.
+        staging_jobs = [*crop_jobs, *tropo_jobs, *orbit_jobs, tec_job, watermask_job]
+        for job in wait(staging_jobs, return_when=FIRST_EXCEPTION).done:
+            job.result()
+        if subset:
+            reference_path, secondary_path = (job.result() for job in crop_jobs)
         reference_tropo, secondary_tropo = (job.result() for job in tropo_jobs)
         reference_orbit, secondary_orbit = (job.result() for job in orbit_jobs)
         tec_path = tec_job.result()

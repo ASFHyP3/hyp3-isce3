@@ -306,7 +306,7 @@ def dense_offsets_in_strips(cfg: dict) -> None:
             grid = _new_ampcor(ref_path, ref_shape, sec_path, sec_shape)
             grid = dense_offsets.set_optional_attributes(grid, offset_params, *ref_shape)
             n_down, n_across = grid.numberWindowDown, grid.numberWindowAcross
-            n_strips = min(os.cpu_count(), n_down)
+            n_strips = min(os.cpu_count() or 1, n_down)
             rows = np.linspace(0, n_down, n_strips + 1).astype(int)
             children = []
             for k in range(n_strips):
@@ -790,33 +790,42 @@ def fast_run(cfg: dict, out_paths: dict, yaml_path: Path) -> None:
     remove_intermediates = worker['intermediate_files_removal_enabled']
     worker['intermediate_files_removal_enabled'] = False
 
-    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('bandpass_insar', 'rdr2geo', 'geo2rdr'))
-    # the RSLCs the main process reads from here on (bandpass_insar may have replaced them)
-    inputs = {key: cfg['input_file_group'][key] for key in ('reference_rslc_file', 'secondary_rslc_file')}
+    try:
+        insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('bandpass_insar', 'rdr2geo', 'geo2rdr'))
+        # the RSLCs the main process reads from here on (bandpass_insar may have replaced them)
+        inputs = {key: cfg['input_file_group'][key] for key in ('reference_rslc_file', 'secondary_rslc_file')}
 
-    # The product writers need geo2rdr's offsets and nothing later, and the files they create are
-    # first opened by offsets_product or rubbersheet, so they run next to coarse resample and dense
-    # offsets. Running them outside this process is what puts the dense offsets in their second
-    # state (see the module docstring), so this overlap is the source of the product difference.
-    with ProcessPoolExecutor(max_workers=1, mp_context=SPAWN) as pool:
-        writers_job = pool.submit(_write_products, runconfig_path, inputs)
-        insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('coarse_resample', 'dense_offsets'))
-        writers_job.result()
+        # The product writers need geo2rdr's offsets and nothing later, and the files they create are
+        # first opened by offsets_product or rubbersheet, so they run next to coarse resample and dense
+        # offsets. Running them outside this process is what puts the dense offsets in their second
+        # state (see the module docstring), so this overlap is the source of the product difference.
+        with ProcessPoolExecutor(max_workers=1, mp_context=SPAWN) as pool:
+            writers_job = pool.submit(_write_products, runconfig_path, inputs)
+            insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('coarse_resample', 'dense_offsets'))
+            writers_job.result()
 
-    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('offsets_product', 'rubbersheet'))
-    # The ionosphere's side-band interferogram needs the rubbersheet offsets and nothing later; the
-    # ionosphere step below collects it.
-    start_side_band(cfg, runconfig_path, out_paths['RUNW'])
-    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('fine_resample', 'crossmul', 'filter_interferogram'))
+        insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('offsets_product', 'rubbersheet'))
+        # The ionosphere's side-band interferogram needs the rubbersheet offsets and nothing later; the
+        # ionosphere step below collects it.
+        start_side_band(cfg, runconfig_path, out_paths['RUNW'])
+        insar.run(
+            cfg=cfg, out_paths=out_paths, run_steps=_only_steps('fine_resample', 'crossmul', 'filter_interferogram')
+        )
 
-    with ProcessPoolExecutor(max_workers=1, mp_context=SPAWN) as pool:
-        side_job = pool.submit(_run_under_unwrap, runconfig_path, inputs)
-        insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('unwrap'))
-        side_job.result()
+        with ProcessPoolExecutor(max_workers=1, mp_context=SPAWN) as pool:
+            side_job = pool.submit(_run_under_unwrap, runconfig_path, inputs)
+            insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('unwrap'))
+            side_job.result()
 
-    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('ionosphere'))
-    geocode_insar.run(cfg, out_paths['RUNW'], out_paths['GUNW'], InputProduct.RUNW)
+        insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('ionosphere'))
+        geocode_insar.run(cfg, out_paths['RUNW'], out_paths['GUNW'], InputProduct.RUNW)
 
-    # Last call: baseline, then the scratch clean-up the earlier calls skipped.
-    worker['intermediate_files_removal_enabled'] = remove_intermediates
-    insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('baseline'))
+        # Last call: baseline, then the scratch clean-up the earlier calls skipped.
+        worker['intermediate_files_removal_enabled'] = remove_intermediates
+        insar.run(cfg=cfg, out_paths=out_paths, run_steps=_only_steps('baseline'))
+    finally:
+        # A failed step leaves the strips and side processes it did not collect running, and Python
+        # waits for them before exiting. Stop them so a failed run ends at once (none are left after a good run).
+        for child in multiprocessing.active_children():
+            child.terminate()
+            child.join()
