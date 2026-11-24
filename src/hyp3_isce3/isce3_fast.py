@@ -1,4 +1,4 @@
-"""Faster isce3 InSAR run for ``++process gunw --fast``.
+"""Faster isce3 InSAR run for ``++process gunw --fast true``.
 
 The same steps and runconfig as nisar.workflows.insar.run, with idle cores put to work. Its products are NOT
 bit-identical to the standard run's. Measured on a full frame (T120 F023, isce3 0.25.22, 2026-11-18): CPU dense offsets

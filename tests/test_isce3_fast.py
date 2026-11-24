@@ -228,7 +228,15 @@ def test_only_steps():
     assert {'bandpass_insar', 'prepare_insar_hdf5', 'unwrap', 'ionosphere', 'baseline'} <= set(steps)
 
 
-@pytest.mark.parametrize('flag, fast', [([], False), (['--fast'], True)])
+@pytest.mark.parametrize(
+    'flag, fast',
+    [
+        ([], False),
+        (['--fast', 'true'], True),
+        (['--fast', 'True'], True),
+        (['--fast', 'false'], False),
+    ],
+)
 def test_main_passes_fast_flag(monkeypatch, flag, fast):
     calls = []
     monkeypatch.setattr(process, 'process_isce3', lambda *args, **kwargs: calls.append(kwargs))

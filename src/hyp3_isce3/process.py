@@ -19,6 +19,7 @@ import utm
 import xarray as xr
 import yaml
 from hyp3lib.aws import upload_file_to_s3
+from hyp3lib.util import string_is_true
 from nisar.products.readers import SLC
 from nisar.workflows import h5_prep, insar, stage_dem
 from nisar.workflows.insar_runconfig import InsarRunConfig
@@ -653,7 +654,9 @@ def main() -> None:
     )
     parser.add_argument(
         '--fast',
-        action='store_true',
+        # HyP3 job specs can only pass a value, so this is --fast true rather than a bare flag
+        type=string_is_true,
+        default=False,
         help='Run isce3 with parallel and overlapped steps. Quicker, but the GUNW is not bit-identical to a SDS run',
     )
 
