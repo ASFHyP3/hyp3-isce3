@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [PEP 440](https://www.python.org/dev/peps/pep-0440/)
 and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0]
+
+### Added
+- `--fast true` runs the isce3 InSAR workflow through the new `hyp3_isce3.isce3_fast` module: the same steps and runconfig, with CPU dense offsets split into parallel azimuth strips, the unwrap-looks crossmul run next to the first crossmul, the rubbersheet azimuth and range offsets for fine resample made side by side in one pass each, the product writers run next to coarse resample and dense offsets, the wrapped-interferogram geocoding, troposphere and solid earth tides run during unwrap, and three slow numpy routines (the rubbersheet polynomial fit and two ionosphere filters) replaced with equivalents, and the reference SLC copied out of its HDF5 once instead of once per step. The GUNW is not bit-identical to a standard run (on a full frame, a smooth surface of about 2 mm in the pixel offsets and 1.5 mrad of phase), so the SDS workflow stays the default.
+- `--fast` unwraps with whirlwind instead of the runconfig's snaphu, for the main unwrap and the ionosphere's own. The unwrapped phase can sit a whole number of cycles from a snaphu run's, connected components differ in low-coherence areas, and the ionosphere phase screen can differ by a constant (64.6 rad on the README subset pair).
+- Before cropping or processing, both RSLCs are checked for the polarizations the runconfig processes, including any the ionosphere correction lists for itself. A pair may now differ in polarization mode (e.g. a dual-pol production RSLC with an HH-only refocus) as long as both hold every processed polarization.
+- A weekly `Update isce3` GitHub workflow opens a pull request when conda-forge has a newer isce3 release built for every supported platform and Python version.
+
+### Changed
+- isce3 is installed from conda-forge (pinned to 0.25.23) instead of being built from source at a pinned commit (0.25.17 plus a version bump), which removes the compile from the Docker build and from `pixi install`, along with the packages only that compile needed (eigen, gtest, fftw, pybind11, pkgconfig). Products follow isce3 0.25.23: product specification 1.6.0, per-polarization `validDataMask` layers, and updated mask values.
+- With `--subset`, the reference and secondary scenes are staged in parallel processes, the RSLC crops start as soon as the skeletons, DEM and runconfig exist, and the crops hold only the polarizations the runconfig processes. A staging failure is reported at once instead of after the other downloads finish.
+
+### Fixed
+- Production runconfigs written by isce3 0.25.16 give the unwrap `mask_type` as a single value; it is wrapped in a list when the installed isce3 schema requires one.
+
 ## [0.5.0]
 
 ### Added

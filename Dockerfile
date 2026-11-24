@@ -35,8 +35,8 @@ COPY --chown=1000:1000 pyproject.toml pixi.lock ./
 RUN pixi install --locked && \
   pixi shell-hook -s bash >> /home/ubuntu/.profile
 
-# Install each dep on a separate layer so we cache the 10 minute long process
-RUN pixi run install-isce3
+# snaphu builds from source; keep it on its own layer so it is cached
+RUN pixi run install-snaphu
 
 COPY --chown=1000:1000 . .
 

@@ -1,0 +1,82 @@
+name: Update isce3
+
+# isce3 is pinned to an exact conda-forge release in pyproject.toml, because a new release can change
+# the products and the runconfig schema. This checks weekly for a newer release and opens a PR for it.
+
+on:
+  schedule:
+    - cron: '0 16 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update-isce3:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+          token: ${{ secrets.TOOLS_BOT_PAK }}
+
+      - name: Compare the pinned isce3 with the newest conda-forge release
+        id: versions
+        run: |
+          # Newest isce3 release conda-forge has built (CPU) for every platform and Python this project
+          # locks. A release reaches platforms at different times, so one missing build rules it out.
+          latest=$(python3 - <<'EOF'
+          import json
+          import re
+          import urllib.request
+
+          platforms = {'linux-64', 'linux-aarch64', 'osx-64', 'osx-arm64'}
+          pythons = {'py312', 'py313', 'py314'}
+          with urllib.request.urlopen('https://api.anaconda.org/package/conda-forge/isce3/files') as response:
+              files = json.load(response)
+          built = {}
+          for file in files:
+              python = re.match(r'py\d+', file['attrs']['build'])
+              if python and 'cuda' not in file['attrs']['build']:
+                  built.setdefault(file['version'], set()).add((file['attrs']['subdir'], python.group()))
+          needed = {(platform, python) for platform in platforms for python in pythons}
+          complete = [version for version, builds in built.items() if needed <= builds]
+          print(max(complete, key=lambda version: tuple(int(part) for part in version.split('.'))))
+          EOF
+          )
+          pinned=$(sed -nE 's/^isce3 = "([0-9.]+)\.\*"$/\1/p' pyproject.toml)
+          echo "pinned $pinned, latest on all platforms $latest"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          # Only a release that sorts above the pin counts, so a pin ahead of conda-forge's complete builds is left alone.
+          if [ "$latest" != "$pinned" ] && [ "$(printf '%s\n' "$pinned" "$latest" | sort -V | tail -n 1)" = "$latest" ]; then
+            echo "newer=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: prefix-dev/setup-pixi@v0.11.2
+        if: steps.versions.outputs.newer == 'true'
+        with:
+          run-install: false
+
+      - name: Pin the new release and re-solve the lock file
+        if: steps.versions.outputs.newer == 'true'
+        run: |
+          sed -i -E 's/^isce3 = "[0-9.]+\.\*"$/isce3 = "${{ steps.versions.outputs.latest }}.*"/' pyproject.toml
+          pixi lock
+
+      - uses: peter-evans/create-pull-request@v7
+        if: steps.versions.outputs.newer == 'true'
+        with:
+          token: ${{ secrets.TOOLS_BOT_PAK }}
+          base: develop
+          branch: update-isce3-${{ steps.versions.outputs.latest }}
+          commit-message: Update isce3 from ${{ steps.versions.outputs.pinned }} to ${{ steps.versions.outputs.latest }}
+          title: Update isce3 from ${{ steps.versions.outputs.pinned }} to ${{ steps.versions.outputs.latest }}
+          body: |
+            conda-forge has isce3 ${{ steps.versions.outputs.latest }} for every platform in `pyproject.toml`; the pin was ${{ steps.versions.outputs.pinned }}.
+
+            Before merging:
+            - Read the [isce3 release notes](https://github.com/isce-framework/isce3/releases) for changes to the InSAR products and the runconfig schema.
+            - Run a GUNW and compare it with one from the previous version.
+            - Add a CHANGELOG entry and set the version label to match what changed.
+
+            The `gpu` environment's isce3 pin is separate and is not changed here.

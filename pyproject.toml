@@ -108,11 +108,9 @@ disable_error_code = ["import-untyped"]
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]
 
-[tool.pixi.pypi-options]
-no-build-isolation = ['isce3']
-
 [tool.pixi.dependencies]
 pip = "*"
+isce3 = "0.25.23.*"
 asf_search = "*"
 boto3 = "*"
 botocore = "*"
@@ -141,16 +139,11 @@ requests = ">=2.0"
 scipy = ">=1.0"
 utm = "*"
 xarray = "*"
-# For building radar deps
+# Compilers, for the snaphu pip build
 cxx-compiler = "*"
 gfortran = "*"
-eigen = ">=3.3.7,<4"
 numba = "*"
 scikit-image = "*"
-pkgconfig = "*"
-gtest = "*"
-fftw = "*"
-pybind11 = "*"
 rioxarray="*"
 ruamel = "*"
 "ruamel.yaml" = "*"
@@ -177,7 +170,7 @@ pyre = "*"
 whirlwind-insar = ">=0.10.0"
 raider = {git = "https://github.com/dbekaert/RAiDER.git", rev = "v0.5.3"}
 
-# GPU image (Dockerfile.gpu): conda-forge's CUDA build of isce3 replaces the CPU source build.
+# GPU image (Dockerfile.gpu): conda-forge's CUDA build of isce3, pinned separately from the CPU build above.
 [tool.pixi.feature.gpu]
 platforms = ["linux-64"]
 
@@ -186,7 +179,7 @@ cuda = "12"
 
 # Only what the focus path imports; the gpu environment skips the default feature (InSAR stack, git pypi deps).
 [tool.pixi.feature.gpu.dependencies]
-isce3 = { version = "0.25.21", build = "*cuda*" }
+isce3 = { version = "0.25.23", build = "*cuda*" }
 python = "3.12.*"
 pip = "*"
 asf_search = "*"
@@ -233,16 +226,6 @@ gpu = { features = ["gpu"], no-default-feature = true }
 cmd = "pip install snaphu --no-cache-dir"
 env = { SKBUILD_STRICT_CONFIG = "0", CMAKE_ARGS = "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types" }
 
-[tool.pixi.tasks.install-isce3]
-cmd = [
-    "python",
-    "-m",
-    "pip",
-    "install",
-    "git+https://github.com/isce-framework/isce3.git@4d2e5f43e6e873972e59a21123f917d1d5dc794a"
-]
-depends-on = ["install-snaphu"]
-
 [tool.pixi.tasks.install-editable]
 cmd = [
     "python",
@@ -252,7 +235,7 @@ cmd = [
     "-e",
     ".",
 ]
-depends-on = ["install-isce3"]
+depends-on = ["install-snaphu"]
 
 [tool.pixi.tasks.tests]
 cmd = [
