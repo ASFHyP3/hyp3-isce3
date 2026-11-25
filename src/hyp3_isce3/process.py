@@ -236,9 +236,10 @@ def download_from_s3(s3_uri: str) -> str:
     parsed = urlparse(s3_uri)
     bucket = parsed.netloc
     key = parsed.path.lstrip('/')
+    filename = Path(key).name
     s3 = boto3.client('s3')
-    s3.download_file(Bucket=bucket, Key=key, Filename=key)
-    return key
+    s3.download_file(Bucket=bucket, Key=key, Filename=filename)
+    return filename
 
 
 def download_rslc(granule_name: str) -> str:
