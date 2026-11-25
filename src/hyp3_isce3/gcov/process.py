@@ -175,7 +175,7 @@ def download_yaml(keyword: str) -> Path:
 
 def process_gcov(
     scene: str,
-    frequencies: list[str],
+    frequency: str | None = None,
     polarizations: list[str] | None = None,
     subset: list[float] | None = None,
     s3_uri: str | None = None,
@@ -185,7 +185,7 @@ def process_gcov(
     Args:
         scene: Name of the reference scene or s3 URI for scene.
         polarizations: List of polarizations to process.
-        frequencies: List of frequencies to process - can be 'A' and/or 'B'.
+        frequency: Frequency band to process - can be 'A' or 'B'.
         subset: Optional WGS84 bounding box [lon_min, lat_min, lon_max, lat_max] to subset the output GCOV.
         s3_uri: Optional S3 URI to download input RSLC from.
 
@@ -193,11 +193,6 @@ def process_gcov(
         h5file: Path of the GCOV h5file.
     """
     earthaccess.login()
-
-    try:
-        orbit_path = get_orbit(scene)
-    except RuntimeError:
-        orbit_path = None
 
     download_path = s3_uri if s3_uri else scene
 
@@ -208,7 +203,23 @@ def process_gcov(
     else:
         rslc_path = download_rslc(download_path)
 
-    tec_path = get_tec(scene)
+    granule_name = Path(rslc_path).stem
+
+    try:
+        orbit_path = get_orbit(granule_name)
+    except RuntimeError:
+        orbit_path = None
+
+    freqs = granule_name.split('_')[8]
+    if freqs == '0505' or freqs == '0005':
+        log.info('Detected 5MHz product, only frequency B will be processed.')
+        frequencies = ['B']
+    elif frequency:
+        frequencies = [frequency]
+    else:
+        frequencies = ['A', 'B']
+
+    tec_path = get_tec(granule_name)
     epsg_code = get_epsg_code(rslc_path)
     dem_path = mosaic_tiles('NISAR_DEM', rslc_path, subset, 'dem.tif')
 
@@ -280,7 +291,11 @@ def determine_granule_uri_from_bucket(bucket: str, prefix: str) -> str:
     if not matches:
         raise FileNotFoundError(f'No H5 file found in s3://{bucket}/{prefix}')
 
-    return f's3://{matches[0]}'
+    uri = f's3://{matches[0]}'
+
+    log.info(f'Found granule at {uri}')
+
+    return uri
 
 
 def main() -> None:
@@ -317,23 +332,15 @@ def main() -> None:
         except AssertionError:
             raise ValueError('Either `--granule` or `--bucket` and `--bucket-prefix` must be provided.')
         scene = determine_granule_uri_from_bucket(args.bucket, args.bucket_prefix)
+    else:
+        scene = args.granule
 
-    scene = args.granule
     s3_uri = None
     if scene.startswith('s3'):
         s3_uri = scene
         scene = s3_uri.split('/')[-1]
 
-    freqs = args.granule.split('_')[8]
-    if freqs == '0505' or freqs == '0005':
-        log.info('Detected 5MHz product, only frequency B will be processed.')
-        frequencies = ['B']
-    elif args.frequency:
-        frequencies = [args.frequency]
-    else:
-        frequencies = ['A', 'B']
-
-    product_file = process_gcov(scene, frequencies, args.polarizations, args.subset, s3_uri=s3_uri)
+    product_file = process_gcov(scene, args.frequency, args.polarizations, args.subset, s3_uri=s3_uri)
 
     if args.bucket:
         upload_file_to_s3(product_file, args.bucket, args.bucket_prefix)
