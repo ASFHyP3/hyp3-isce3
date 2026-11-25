@@ -7,8 +7,10 @@ import shutil
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import asf_search as asf
+import boto3
 import earthaccess
 import h5py
 import utm
@@ -222,11 +224,29 @@ def download_yaml(keyword: str) -> Path:
     return tmp_yaml
 
 
+def download_from_s3(s3_uri: str) -> str:
+    """Download product from S3.
+
+    Args:
+        s3_uri: The URI for the product to be downloaded.
+
+    Returns:
+        Path to the downloaded file.
+    """
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    key = parsed.path.lstrip('/')
+    filename = Path(key).name
+    s3 = boto3.client('s3')
+    s3.download_file(Bucket=bucket, Key=key, Filename=filename)
+    return filename
+
+
 def download_rslc(granule_name: str) -> str:
     """Download RSLC product, or use it as is when it is already a local file.
 
     Args:
-        granule_name: Name of the scene, or the path of a local RSLC h5 file.
+        granule_name: Name of the scene, or the path of a local RSLC h5 file, or an s3 uri.
 
     Returns:
         h5file_path: Path of the h5 file.
@@ -234,6 +254,9 @@ def download_rslc(granule_name: str) -> str:
     # A local RSLC (e.g. one focused with ++process focus_l0b) is not in CMR.
     if Path(granule_name).is_file():
         return granule_name
+    # Download from a S3 bucket, rather than earthaccess
+    if granule_name.startswith('s3'):
+        return download_from_s3(granule_name)
     # Same lookup as the streaming path; keep only the .h5 in case the granule ships other files.
     files = earthaccess.download([find_rslc(granule_name)])
     h5_files = [f for f in files if str(f).endswith('.h5')]

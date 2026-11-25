@@ -40,6 +40,7 @@ develop = [
 [project.entry-points.hyp3]
 gunw = "hyp3_isce3.process:main"
 focus_l0b = "hyp3_isce3.focus.process:main"
+gcov = "hyp3_isce3.gcov.process:main"
 
 [project.urls]
 Homepage = "https://github.com/ASFHyP3/hyp3-isce3"
@@ -122,6 +123,7 @@ ecmwf-api-client="*"
 gdal = ">=3"
 geopandas="*"
 h5netcdf = "*"
+h5py = "*"
 herbie-data="<2025.2.1"
 hyp3lib = ">=4,<5"
 libgdal-netcdf = "*"
@@ -190,24 +192,55 @@ isce3 = { version = "0.25.21", build = "*cuda*" }
 python = "3.12.*"
 pip = "*"
 asf_search = "*"
+boto3 = "*"
+botocore = "*"
+burst2safe = ">=1.4.4"
 earthaccess = "*"
+ecmwf-api-client="*"
 gdal = ">=3"
-geopandas = "*"
+geopandas="*"
+h5netcdf = "*"
 h5py = "*"
+herbie-data="<2025.2.1"
 hyp3lib = ">=4,<5"
+libgdal-netcdf = "*"
+libgdal-jp2openjpeg = "*"
+matplotlib-base = "*"
+netcdf4 = "*"
+numpy = "<2.4"
+opencv = "*"
+pandas = ">=1.4,<3.0"
+pyaps3="*"
+pydap="<3.5.11"
+pygrib="*"
+pyproj = ">=3.3"
+python-dateutil = "*"
 pyyaml = "*"
+rasterio="*"
+requests = ">=2.0"
 shapely = "*"
-
-[tool.pixi.feature.gpu.tasks.install-editable-gpu]
-cmd = [
-    "python",
-    "-m",
-    "pip",
-    "install",
-    "--no-deps",
-    "-e",
-    ".",
-]
+scipy = ">=1.0"
+utm = "*"
+xarray = "*"
+whirlwind-insar = "*"
+# For building radar deps
+cxx-compiler = "*"
+gfortran = "*"
+eigen = ">=3.3.7,<4"
+numba = "*"
+scikit-image = "*"
+pkgconfig = "*"
+gtest = "*"
+fftw = "*"
+pybind11 = "*"
+rioxarray="*"
+ruamel = "*"
+"ruamel.yaml" = "*"
+yamale = "*"
+backoff = "*"
+pysolid = "*"
+# For PyCharm IDE integration
+pixi-pycharm = ">=0.0.8,<0.0.9"
 
 [tool.pixi.feature.pycharm.dependencies]
 pixi-pycharm = "*"
@@ -232,6 +265,22 @@ gpu = { features = ["gpu"], no-default-feature = true }
 [tool.pixi.tasks.install-snaphu]
 cmd = "pip install snaphu --no-cache-dir"
 env = { SKBUILD_STRICT_CONFIG = "0", CMAKE_ARGS = "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types" }
+
+[tool.pixi.feature.gpu.tasks.install-snaphu]
+cmd = "pip install snaphu --no-cache-dir"
+env = { SKBUILD_STRICT_CONFIG = "0", CMAKE_ARGS = "-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types" }
+
+[tool.pixi.feature.gpu.tasks.install-editable-gpu]
+cmd = [
+    "python",
+    "-m",
+    "pip",
+    "install",
+    "--no-deps",
+    "-e",
+    ".",
+]
+depends-on = ["install-snaphu"]
 
 [tool.pixi.tasks.install-isce3]
 cmd = [
